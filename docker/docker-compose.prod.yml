@@ -1,0 +1,64 @@
+# Прод: образ тянется из Harbor по тегу, собранному пайплайном.
+# Разворачивается deploy-джобом (см. .gitea/workflows/pipeline.yml), который
+# копирует на хост только этот файл — .env лежит на хосте постоянно и в
+# репозитории не хранится.
+name: max-bot-template
+
+services:
+  bot:
+    image: ${HARBOR_REGISTRY:-harbor.volganet.ru}/${HARBOR_PROJECT:-bothub-private}/${HARBOR_IMAGE:-max-bot-template}:${IMAGE_TAG:-latest}
+    # build оставлен для аварийной локальной пересборки прод-конфигурации;
+    # штатный путь — docker compose pull.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+      args:
+        INSTALL_EXTRAS: ${INSTALL_EXTRAS:-}
+        UID: ${UID:-10001}
+        GID: ${GID:-10001}
+    # .env лежит рядом с этим файлом на прод-хосте.
+    env_file: .env
+    environment:
+      # Тег образа попадает внутрь процесса — команда /v показывает,
+      # что развёрнуто на самом деле.
+      BUILD_TAG: ${IMAGE_TAG:-}
+    restart: unless-stopped
+    # Лимиты: бот не должен утащить хост за собой при утечке или флуде.
+    mem_limit: 2g
+    mem_reservation: 512m
+    cpus: 2.0
+    pids_limit: 256
+    # expose, а не ports: наружу бот публикуется реверс-прокси, напрямую порт
+    # на хост не пробрасывается.
+    expose:
+      - "${PORT:-8081}"
+    networks:
+      maxbots-network:
+        aliases:
+          - max-bot
+    volumes:
+      # Named volume: правами управляет Docker, рассинхрона с uid хоста нет.
+      # Читать логи: docker compose exec bot cat /app/logs/bot.log
+      - botlogs:/app/logs
+    healthcheck:
+      # Работает только при BOT_MODE=webhook (в polling порт не слушается).
+      # Для polling healthcheck следует убрать, иначе контейнер будет
+      # помечен unhealthy при полностью исправном боте.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PORT:-8081}/healthz', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  botlogs:
+
+networks:
+  maxbots-network:
+    external: true
+    name: maxbots-network

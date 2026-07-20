@@ -1,0 +1,41 @@
+# Виртуальное окружение и кэши
+.venv/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Git и CI
+.git/
+.github/
+.gitea/
+
+# Среда разработки
+.env
+.env.local
+.env.*.local
+.vscode/
+.idea/
+
+# Логи и runtime-данные
+logs/
+*.log
+*.sqlite
+*.db
+dump_*.sql
+dump_*.dump
+
+# Dev-артефакты
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Документация (в образе не нужна)
+docs/
+
+# ВНИМАНИЕ: tests/ и *.md намеренно НЕ исключены.
+# tests/ нужны стадии `test` в Dockerfile — она гоняет линт и pytest внутри
+# образа, проверяя ровно ту среду, что поедет на прод (это делает CI).
+# Исключение README.md ломало бы hatchling, если вернуть `readme` в
+# pyproject.toml. Обе директории весят десятки килобайт — экономить не на чем.

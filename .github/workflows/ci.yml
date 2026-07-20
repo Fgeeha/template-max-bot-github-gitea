@@ -1,0 +1,138 @@
+# CI для GitHub: линт, тесты, сборка образа и публикация в GHCR.
+# Бот в CI не запускается — токена нет и смысла тоже.
+#
+# Полный CD (деплой на прод-хост по SSH) живёт в .gitea/workflows/pipeline.yml:
+# прод-контур закрытый, из GitHub Actions до него нет доступа.
+name: CI
+
+on:
+  push:
+    branches: [Master, master, main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [Master, master, main]
+
+# Новый пуш в ту же ветку отменяет предыдущий прогон.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Минимум прав по умолчанию; повышаем точечно там, где нужно публиковать.
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить uv (+ кэш по uv.lock)
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Синхронизировать зависимости
+        run: uv sync --all-extras
+
+      - name: Линт (ruff check)
+        run: uv run ruff check src tests
+
+      - name: Формат без автофикса
+        run: uv run ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Плейсхолдер, НЕ секрет: Settings требует MAX_BOT_TOKEN при создании,
+      # тесты герметичны и в сеть не ходят.
+      MAX_BOT_TOKEN: ci-not-a-real-token
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить uv (+ кэш по uv.lock)
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Синхронизировать зависимости
+        run: uv sync --all-extras
+
+      - name: Тесты (pytest)
+        run: uv run pytest -q
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # публикация в GHCR (не на PR)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Валидация compose-файлов
+        run: |
+          set -euo pipefail
+          # local ждёт .env в корне (env_file: ../.env),
+          # prod — .env рядом с собой (env_file: .env).
+          cp .env.example .env
+          cp .env.example docker/.env
+          docker compose -f docker/docker-compose.local.yml --env-file .env config -q
+          docker compose -f docker/docker-compose.prod.yml --env-file .env config -q
+
+      - name: Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Логинимся только когда реально публикуем.
+      - name: Логин в GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Теги и метки образа
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Сборка (push только не на PR)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Публичные источники: у GitHub-раннера нет доступа к контуру.
+          build-args: |
+            BASE_IMAGE=python:3.12-slim-bookworm
+            UV_IMAGE=ghcr.io/astral-sh/uv:latest
+            USE_NEXUS_APT=0
+            UID=1000
+            GID=1000
+          load: ${{ github.event_name == 'pull_request' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Полный старт бота проверить нельзя: с плейсхолдер-токеном первый же
+      # запрос к API вернёт 401. Проверяем то, что реально ломается при сборке
+      # — импорт пакета: он тянет зависимости и валидирует конфиг, без сети.
+      - name: Smoke-тест образа
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          docker run --rm --entrypoint python \
+            -e MAX_BOT_TOKEN=ci-smoke-placeholder \
+            "$IMAGE" -c "import bot.__main__; print('smoke OK')"

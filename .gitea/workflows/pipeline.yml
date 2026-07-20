@@ -1,0 +1,649 @@
+# ЕДИНЫЙ workflow для Gitea: CI (lint/test/build) + CD (release/deploy/rollback).
+#
+# ПОЧЕМУ ОДИН ФАЙЛ, А НЕ ci.yml + cd.yml.
+# В Gitea Actions нет события workflow_run (go-gitea/gitea#24898), поэтому
+# запустить деплой «после успешного CI» из отдельного файла нечем. Единственный
+# штатный способ выстроить зависимость — needs: внутри одного файла. Здесь
+# deploy физически не стартует без успешных lint + test + build.
+# ВАЖНО: Gitea запускает КАЖДЫЙ файл в .gitea/workflows/ независимо — не
+# добавляйте рядом второй workflow с теми же триггерами, получите двойные прогоны.
+#
+# ПРЕДУСЛОВИЕ ЗАКРЫТОГО КОНТУРА.
+# На раннере нет доступа к astral.sh, поэтому бинарь uv кладётся в репозиторий
+# архивом build/uv/*.tar.gz и распаковывается на каждом джобе.
+#
+# Требуемые Gitea Variables:
+#   HARBOR_REGISTRY, HARBOR_PROJECT, HARBOR_IMAGE, RUNNER_LABEL,
+#   NEXUS_URL (опц.), PROD_HOST, PROD_USER, PROD_PATH, INSTALL_EXTRAS (опц.)
+# Требуемые Gitea Secrets:
+#   HARBOR_USERNAME, HARBOR_PASSWORD, SSH_PRIVATE_KEY,
+#   NEXUS_USERNAME / NEXUS_PASSWORD (опц.)
+
+name: pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [main, master, Master]
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY || 'harbor.volganet.ru' }}
+  HARBOR_PROJECT: ${{ vars.HARBOR_PROJECT || 'bothub-private' }}
+  HARBOR_IMAGE: ${{ vars.HARBOR_IMAGE || 'max-bot-template' }}
+  INSTALL_EXTRAS: ${{ vars.INSTALL_EXTRAS || '' }}
+
+jobs:
+  # ── Линт ────────────────────────────────────────────────────────────────────
+  lint:
+    concurrency:
+      group: ci-lint-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ${{ vars.RUNNER_LABEL || 'python-fix-3.12' }}
+    env:
+      UV_NO_PYTHON_DOWNLOADS: "1"
+      UV_SYSTEM_CERTS: "1"
+    steps:
+      - name: Checkout
+        uses: https://gitea.volganet.ru/actions/checkout@releases/v5
+        env:
+          GIT_SSL_NO_VERIFY: true
+
+      - name: Глобальный git-конфиг (нужен шагу Post Checkout)
+        run: |
+          git config --global http.sslVerify false
+          git config --global --add safe.directory '*'
+        shell: bash
+
+      - name: Распаковать uv
+        run: |
+          set -euo pipefail
+          mkdir -p build/uv
+          UV_ARCHIVE=$(find build/uv -maxdepth 1 -name "*.tar.gz" | head -n 1)
+          if [ -n "$UV_ARCHIVE" ]; then
+            tar -xzf "$UV_ARCHIVE" -C build/uv/
+            if [ -f "build/uv/uv-x86_64-unknown-linux-gnu/uv" ]; then
+              mv "build/uv/uv-x86_64-unknown-linux-gnu/uv" build/uv/uv
+              chmod +x build/uv/uv
+              rm -rf "build/uv/uv-x86_64-unknown-linux-gnu"
+            else
+              echo "Не найден бинарник после распаковки"; exit 1
+            fi
+          elif [ ! -f "build/uv/uv" ]; then
+            echo "Нет ни архива, ни бинарника в build/uv/"; exit 1
+          fi
+        shell: bash
+
+      - name: Добавить uv в PATH
+        run: |
+          UV_PATH="${GITHUB_WORKSPACE}/build/uv"
+          chmod +x "${UV_PATH}/uv"
+          echo "${UV_PATH}" >> "$GITHUB_PATH"
+        shell: bash
+
+      - name: Виртуальное окружение на системном Python
+        run: |
+          uv venv --python python3
+          .venv/bin/python --version
+        shell: bash
+
+      - name: Синхронизировать зависимости
+        run: |
+          set -euo pipefail
+          # Gitea Variable может прийти с CR/LF — иначе URL склеится с \r.
+          NEXUS_URL="$(printf '%s' "${NEXUS_URL:-}" | tr -d '\r\n')"
+          if [ -z "$NEXUS_URL" ]; then
+            uv sync --no-python-downloads --all-extras
+            exit 0
+          fi
+          INDEX_URL="${NEXUS_URL%/}"
+          case "$INDEX_URL" in */simple) ;; *) INDEX_URL="${INDEX_URL}/simple" ;; esac
+          if [ -n "${NEXUS_USERNAME:-}" ] && [ -n "${NEXUS_PASSWORD:-}" ]; then
+            INDEX_URL="https://${NEXUS_USERNAME}:${NEXUS_PASSWORD}@${INDEX_URL#https://}"
+          fi
+          uv sync --no-python-downloads --all-extras --default-index "$INDEX_URL"
+        shell: bash
+        env:
+          NEXUS_URL: ${{ vars.NEXUS_URL }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+
+      - name: Линт (ruff check)
+        run: uv run --no-sync ruff check src tests
+        shell: bash
+
+      - name: Формат без автофикса
+        run: uv run --no-sync ruff format --check .
+        shell: bash
+
+  # ── Тесты ───────────────────────────────────────────────────────────────────
+  test:
+    concurrency:
+      group: ci-test-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ${{ vars.RUNNER_LABEL || 'python-fix-3.12' }}
+    env:
+      UV_NO_PYTHON_DOWNLOADS: "1"
+      UV_SYSTEM_CERTS: "1"
+      # Плейсхолдер, НЕ секрет: бот в CI не запускается, тесты герметичны.
+      MAX_BOT_TOKEN: ci-not-a-real-token
+    steps:
+      - name: Checkout
+        uses: https://gitea.volganet.ru/actions/checkout@releases/v5
+        env:
+          GIT_SSL_NO_VERIFY: true
+
+      - name: Глобальный git-конфиг
+        run: |
+          git config --global http.sslVerify false
+          git config --global --add safe.directory '*'
+        shell: bash
+
+      - name: Распаковать uv
+        run: |
+          set -euo pipefail
+          mkdir -p build/uv
+          UV_ARCHIVE=$(find build/uv -maxdepth 1 -name "*.tar.gz" | head -n 1)
+          if [ -n "$UV_ARCHIVE" ]; then
+            tar -xzf "$UV_ARCHIVE" -C build/uv/
+            if [ -f "build/uv/uv-x86_64-unknown-linux-gnu/uv" ]; then
+              mv "build/uv/uv-x86_64-unknown-linux-gnu/uv" build/uv/uv
+              chmod +x build/uv/uv
+              rm -rf "build/uv/uv-x86_64-unknown-linux-gnu"
+            fi
+          elif [ ! -f "build/uv/uv" ]; then
+            echo "Нет ни архива, ни бинарника в build/uv/"; exit 1
+          fi
+        shell: bash
+
+      - name: Добавить uv в PATH
+        run: |
+          UV_PATH="${GITHUB_WORKSPACE}/build/uv"
+          chmod +x "${UV_PATH}/uv"
+          echo "${UV_PATH}" >> "$GITHUB_PATH"
+        shell: bash
+
+      - name: Виртуальное окружение на системном Python
+        run: |
+          uv venv --python python3
+          .venv/bin/python --version
+        shell: bash
+
+      - name: Синхронизировать зависимости
+        run: |
+          set -euo pipefail
+          NEXUS_URL="$(printf '%s' "${NEXUS_URL:-}" | tr -d '\r\n')"
+          if [ -z "$NEXUS_URL" ]; then
+            uv sync --no-python-downloads --all-extras
+            exit 0
+          fi
+          INDEX_URL="${NEXUS_URL%/}"
+          case "$INDEX_URL" in */simple) ;; *) INDEX_URL="${INDEX_URL}/simple" ;; esac
+          if [ -n "${NEXUS_USERNAME:-}" ] && [ -n "${NEXUS_PASSWORD:-}" ]; then
+            INDEX_URL="https://${NEXUS_USERNAME}:${NEXUS_PASSWORD}@${INDEX_URL#https://}"
+          fi
+          uv sync --no-python-downloads --all-extras --default-index "$INDEX_URL"
+        shell: bash
+        env:
+          NEXUS_URL: ${{ vars.NEXUS_URL }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+
+      - name: Тесты (pytest)
+        run: |
+          uv run --no-sync pytest -q
+          # Гасим всё, что могло остаться от тестов и держит порт/раннер.
+          pkill -9 -f uvicorn || true
+        shell: bash
+
+  # ── Сборка образа + smoke. На PR — без публикации ────────────────────────────
+  build:
+    needs: [lint, test]
+    concurrency:
+      group: ci-build-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ${{ vars.RUNNER_LABEL || 'python-fix-3.12' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: https://gitea.volganet.ru/actions/checkout@releases/v5
+        env:
+          GIT_SSL_NO_VERIFY: true
+
+      - name: Глобальный git-конфиг
+        run: |
+          git config --global http.sslVerify false
+          git config --global --add safe.directory '*'
+        shell: bash
+
+      - name: Проверить Docker/Compose на раннере
+        run: |
+          set -euo pipefail
+          docker version
+          docker compose version
+        shell: bash
+
+      - name: Валидация compose-файлов
+        run: |
+          set -euo pipefail
+          # local ждёт .env в корне (env_file: ../.env);
+          # prod — .env рядом с собой (так его разворачивает deploy).
+          cp .env.example .env
+          cp .env.example docker/.env
+          docker compose -f docker/docker-compose.local.yml --env-file .env config -q
+          docker compose -f docker/docker-compose.prod.yml --env-file .env config -q
+        shell: bash
+
+      # INDEX_URL содержит пароль — кладём в GITHUB_ENV и НЕ печатаем.
+      - name: Подготовить INDEX_URL
+        run: |
+          set -euo pipefail
+          INDEX_URL=""
+          if [ -n "${NEXUS_URL:-}" ]; then
+            BASE_URL="$(printf '%s' "${NEXUS_URL}" | tr -d '\r\n')"
+            BASE_URL="${BASE_URL%/}"
+            case "$BASE_URL" in */simple) ;; *) BASE_URL="${BASE_URL}/simple" ;; esac
+            INDEX_URL="$BASE_URL"
+            if [ -n "${NEXUS_USERNAME:-}" ] && [ -n "${NEXUS_PASSWORD:-}" ]; then
+              INDEX_URL="https://${NEXUS_USERNAME}:${NEXUS_PASSWORD}@${INDEX_URL#https://}"
+            fi
+          fi
+          echo "::add-mask::${INDEX_URL}"
+          echo "INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
+        shell: bash
+        env:
+          NEXUS_URL: ${{ vars.NEXUS_URL }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+
+      # Цель test прогоняет линт и тесты внутри образа — проверяет ровно ту
+      # среду, что поедет на прод, а не окружение раннера.
+      - name: Сборка и прогон цели test
+        run: |
+          set -euo pipefail
+          docker build -f docker/Dockerfile --target test \
+            --build-arg INDEX_URL="$INDEX_URL" \
+            --build-arg INSTALL_EXTRAS="$INSTALL_EXTRAS" \
+            -t max-bot:test .
+          docker run --rm -e MAX_BOT_TOKEN=ci-not-a-real-token max-bot:test
+        shell: bash
+
+      - name: Сборка runtime-образа
+        id: build_image
+        run: |
+          set -euo pipefail
+          SHORT="${GITHUB_SHA::8}"
+          IMAGE="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${HARBOR_IMAGE}"
+          docker build -f docker/Dockerfile --target runtime \
+            --build-arg INDEX_URL="$INDEX_URL" \
+            --build-arg INSTALL_EXTRAS="$INSTALL_EXTRAS" \
+            --build-arg BUILD_TAG="sha-${SHORT}" \
+            -t "${IMAGE}:sha-${SHORT}" .
+          echo "image_ref=${IMAGE}:sha-${SHORT}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      # Полный старт не проверяем: с плейсхолдер-токеном polling сразу уходит
+      # в authenticated-запрос и падает с 401 — гейт был бы красным при
+      # исправной сборке. Импорт пакета тянет все зависимости и строит
+      # конфиг, то есть ловит именно ошибки сборки.
+      - name: Smoke-тест образа
+        env:
+          IMAGE_REF: ${{ steps.build_image.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python \
+            -e MAX_BOT_TOKEN=ci-smoke-placeholder \
+            "$IMAGE_REF" -c "import bot.__main__; print('smoke OK')"
+        shell: bash
+
+      - name: Trivy-скан (информационно, гейт не валит)
+        env:
+          IMAGE_REF: ${{ steps.build_image.outputs.image_ref }}
+          TRIVY_OFFLINE_SCAN: "true"
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if ! command -v trivy >/dev/null 2>&1; then
+            echo "trivy не установлен — пропуск"
+            exit 0
+          fi
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 "$IMAGE_REF"
+        shell: bash
+
+      - name: Login в Harbor
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" \
+            -u "${HARBOR_USERNAME}" --password-stdin
+        shell: bash
+
+      # Публикуем sha-<short> и на push тега тоже — иначе release-image не
+      # найдёт готовый образ и каждый релиз уходил бы в пересборку.
+      - name: Push sha-образа
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          IMAGE_REF: ${{ steps.build_image.outputs.image_ref }}
+        run: docker push "${IMAGE_REF}"
+        shell: bash
+
+      - name: Очистка раннера
+        if: ${{ always() }}
+        env:
+          IMAGE_REF: ${{ steps.build_image.outputs.image_ref }}
+        run: |
+          docker rmi -f "$IMAGE_REF" max-bot:test 2>/dev/null || true
+          docker logout "${HARBOR_REGISTRY}" 2>/dev/null || true
+        shell: bash
+
+  # ── Релизный образ: перетегировать sha-образ в vX.Y.Z ───────────────────────
+  release-image:
+    needs: [build]
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    concurrency:
+      group: cd-prod
+      cancel-in-progress: false # идущий релиз не обрываем — на проде это опасно
+    runs-on: ${{ vars.RUNNER_LABEL || 'python-fix-3.12' }}
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      image_ref: ${{ steps.resolve.outputs.image_ref }}
+    steps:
+      - name: Checkout (нужен для fallback-сборки)
+        uses: https://gitea.volganet.ru/actions/checkout@releases/v5
+        env:
+          GIT_SSL_NO_VERIFY: true
+
+      - name: Определить версию
+        id: resolve
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/}"
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "Некорректный тег: '$VERSION' (ожидается vX.Y.Z)"; exit 1 ;;
+          esac
+          IMAGE="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${HARBOR_IMAGE}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Login в Harbor
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" \
+            -u "${HARBOR_USERNAME}" --password-stdin
+        shell: bash
+
+      - name: Забрать образ от build (или уйти в fallback)
+        id: acquire
+        env:
+          IMAGE_REF: ${{ steps.resolve.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          IMAGE="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${HARBOR_IMAGE}"
+          SHA_REF="${IMAGE}:sha-${GITHUB_SHA::8}"
+          if docker pull "${SHA_REF}"; then
+            docker tag "${SHA_REF}" "${IMAGE_REF}"
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Образа ${SHA_REF} нет — соберу из исходников тега"
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
+      - name: Fallback · сборка из исходников тега
+        if: ${{ steps.acquire.outputs.need_build == 'true' }}
+        env:
+          IMAGE_REF: ${{ steps.resolve.outputs.image_ref }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker build -f docker/Dockerfile --target runtime \
+            --build-arg INSTALL_EXTRAS="$INSTALL_EXTRAS" \
+            --build-arg BUILD_TAG="${VERSION}" \
+            -t "${IMAGE_REF}" .
+        shell: bash
+
+      - name: Push релизного образа
+        env:
+          IMAGE_REF: ${{ steps.resolve.outputs.image_ref }}
+        run: docker push "${IMAGE_REF}"
+        shell: bash
+
+      - name: Очистка раннера
+        if: ${{ always() }}
+        env:
+          IMAGE_REF: ${{ steps.resolve.outputs.image_ref }}
+        run: |
+          docker rmi -f "$IMAGE_REF" 2>/dev/null || true
+          docker image prune -f >/dev/null 2>&1 || true
+          docker logout "${HARBOR_REGISTRY}" 2>/dev/null || true
+        shell: bash
+
+  # ── Деплой на прод по SSH ───────────────────────────────────────────────────
+  deploy:
+    needs: [release-image]
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    concurrency:
+      group: cd-prod
+      cancel-in-progress: false
+    runs-on: ${{ vars.RUNNER_LABEL || 'python-fix-3.12' }}
+    environment: production
+    steps:
+      - name: Checkout
+        uses: https://gitea.volganet.ru/actions/checkout@releases/v5
+        env:
+          GIT_SSL_NO_VERIFY: true
+
+      - name: Подготовить SSH-ключ
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+        shell: bash
+
+      # .env не копируем: боевые секреты живут на хосте и через пайплайн не ходят.
+      - name: Скопировать compose на прод-хост
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          PROD_PATH: ${{ vars.PROD_PATH }}
+        run: |
+          set -euo pipefail
+          # Значения из Gitea Variables чистим от \r и пробелов по краям.
+          PROD_USER="$(printf '%s' "${PROD_USER}" | tr -d '\r\n' | xargs)"
+          PROD_HOST="$(printf '%s' "${PROD_HOST}" | tr -d '\r\n' | xargs)"
+          PROD_PATH="$(printf '%s' "${PROD_PATH}" | tr -d '\r\n' | xargs)"
+          SRC="docker/docker-compose.prod.yml"
+          [ -f "$SRC" ] || { echo "Не найден $SRC"; exit 1; }
+          SSH_OPTS="-i $HOME/.ssh/id_deploy -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          ssh $SSH_OPTS "${PROD_USER}@${PROD_HOST}" "mkdir -p '${PROD_PATH}'"
+          scp $SSH_OPTS "$SRC" "${PROD_USER}@${PROD_HOST}:${PROD_PATH}/docker-compose.prod.yml"
+        shell: bash
+
+      - name: Деплой (pull + up -d)
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          PROD_PATH: ${{ vars.PROD_PATH }}
+          VERSION: ${{ needs.release-image.outputs.version }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          PROD_USER="$(printf '%s' "${PROD_USER}" | tr -d '\r\n' | xargs)"
+          PROD_HOST="$(printf '%s' "${PROD_HOST}" | tr -d '\r\n' | xargs)"
+          PROD_PATH="$(printf '%s' "${PROD_PATH}" | tr -d '\r\n' | xargs)"
+          echo "Деплой ${VERSION} на ${PROD_USER}@${PROD_HOST}:${PROD_PATH}"
+          ssh -i ~/.ssh/id_deploy \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              "${PROD_USER}@${PROD_HOST}" \
+              IMAGE_TAG="${VERSION}" \
+              HARBOR_REGISTRY="${HARBOR_REGISTRY}" \
+              HARBOR_PROJECT="${HARBOR_PROJECT}" \
+              HARBOR_IMAGE="${HARBOR_IMAGE}" \
+              HARBOR_USERNAME="${HARBOR_USERNAME}" \
+              HARBOR_PASSWORD="${HARBOR_PASSWORD}" \
+              PROD_PATH="${PROD_PATH}" \
+              'bash -seo pipefail' <<'REMOTE'
+            set -euo pipefail
+            cd "${PROD_PATH}"
+            echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" \
+              -u "${HARBOR_USERNAME}" --password-stdin
+
+            # Запоминаем предыдущий тег — на него откатится job rollback.
+            if [ -f .image_tag.current ]; then
+              cp .image_tag.current .image_tag.previous
+            fi
+            echo "${IMAGE_TAG}" > .image_tag.current
+
+            export IMAGE_TAG HARBOR_REGISTRY HARBOR_PROJECT HARBOR_IMAGE
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            docker image prune -f >/dev/null 2>&1 || true
+            docker logout "${HARBOR_REGISTRY}" || true
+            echo "Развёрнута версия: ${IMAGE_TAG}"
+          REMOTE
+        shell: bash
+
+      # Контейнер должен быть запущен и не уходить в рестарт-петлю.
+      - name: Health-check
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          PROD_PATH: ${{ vars.PROD_PATH }}
+        run: |
+          set -euo pipefail
+          PROD_USER="$(printf '%s' "${PROD_USER}" | tr -d '\r\n' | xargs)"
+          PROD_HOST="$(printf '%s' "${PROD_HOST}" | tr -d '\r\n' | xargs)"
+          PROD_PATH="$(printf '%s' "${PROD_PATH}" | tr -d '\r\n' | xargs)"
+          ssh -i ~/.ssh/id_deploy \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              "${PROD_USER}@${PROD_HOST}" \
+              PROD_PATH="${PROD_PATH}" \
+              'bash -seo pipefail' <<'REMOTE'
+            set -euo pipefail
+            cd "${PROD_PATH}"
+            CID=""
+            for _ in $(seq 1 10); do
+              CID="$(docker compose -f docker-compose.prod.yml ps -q bot)"
+              [ -n "$CID" ] && break
+              sleep 2
+            done
+            if [ -z "$CID" ]; then
+              echo "Контейнер bot не найден" >&2
+              docker compose -f docker-compose.prod.yml ps || true
+              exit 1
+            fi
+
+            ok=0
+            for _ in $(seq 1 20); do
+              if [ "$(docker inspect -f '{{.State.Running}}' "$CID")" = "true" ]; then
+                ok=1
+                break
+              fi
+              sleep 3
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "HEALTH FAILED" >&2
+              docker compose -f docker-compose.prod.yml ps || true
+              docker logs --tail 80 "$CID" || true
+              exit 1
+            fi
+            echo "health OK"
+          REMOTE
+        shell: bash
+
+      - name: Удалить SSH-ключ
+        if: ${{ always() }}
+        run: rm -f ~/.ssh/id_deploy || true
+        shell: bash
+
+  # ── Откат при провале деплоя или health-check ───────────────────────────────
+  rollback:
+    needs: [deploy]
+    if: ${{ failure() && startsWith(github.ref, 'refs/tags/') }}
+    concurrency:
+      group: cd-prod
+      cancel-in-progress: false
+    runs-on: ${{ vars.RUNNER_LABEL || 'python-fix-3.12' }}
+    environment: production
+    steps:
+      - name: Подготовить SSH-ключ
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+        shell: bash
+
+      - name: Откатить на предыдущий тег
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          PROD_PATH: ${{ vars.PROD_PATH }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          PROD_USER="$(printf '%s' "${PROD_USER}" | tr -d '\r\n' | xargs)"
+          PROD_HOST="$(printf '%s' "${PROD_HOST}" | tr -d '\r\n' | xargs)"
+          PROD_PATH="$(printf '%s' "${PROD_PATH}" | tr -d '\r\n' | xargs)"
+          ssh -i ~/.ssh/id_deploy \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              "${PROD_USER}@${PROD_HOST}" \
+              HARBOR_REGISTRY="${HARBOR_REGISTRY}" \
+              HARBOR_PROJECT="${HARBOR_PROJECT}" \
+              HARBOR_IMAGE="${HARBOR_IMAGE}" \
+              HARBOR_USERNAME="${HARBOR_USERNAME}" \
+              HARBOR_PASSWORD="${HARBOR_PASSWORD}" \
+              PROD_PATH="${PROD_PATH}" \
+              'bash -seo pipefail' <<'REMOTE'
+            set -euo pipefail
+            cd "${PROD_PATH}"
+            if [ ! -f .image_tag.previous ]; then
+              echo "Нет .image_tag.previous — откатывать не на что, нужно ручное вмешательство" >&2
+              exit 1
+            fi
+            PREV="$(cat .image_tag.previous)"
+            echo "Откат на ${PREV}"
+            echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" \
+              -u "${HARBOR_USERNAME}" --password-stdin
+            export IMAGE_TAG="${PREV}"
+            export HARBOR_REGISTRY HARBOR_PROJECT HARBOR_IMAGE
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            echo "${PREV}" > .image_tag.current
+            docker logout "${HARBOR_REGISTRY}" || true
+            echo "Откат выполнен на ${PREV}"
+          REMOTE
+        shell: bash
+
+      - name: Удалить SSH-ключ
+        if: ${{ always() }}
+        run: rm -f ~/.ssh/id_deploy || true
+        shell: bash

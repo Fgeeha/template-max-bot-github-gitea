@@ -1,0 +1,24 @@
+# Вариант для закрытого контура: хуки берутся из зеркала Gitea.
+# Активируется через `make precommit`, если gitea.volganet.ru доступна.
+exclude: ^(\.gitea/|migrations/versions/)
+
+repos:
+  - repo: https://gitea.volganet.ru/pre-commit/ruff-pre-commit
+    rev: v0.15.15
+    hooks:
+      - id: ruff
+        name: ruff (проверка и автоисправление)
+        args: [--fix]
+      - id: ruff-format
+        name: ruff (форматирование)
+
+  - repo: https://gitea.volganet.ru/pre-commit/pre-commit-hooks
+    rev: main
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: detect-private-key

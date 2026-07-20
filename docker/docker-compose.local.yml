@@ -1,0 +1,56 @@
+# Локальная разработка: бот собирается из исходников (в отличие от prod, где
+# образ тянется из Harbor). Запуск: make up-local
+#
+# name фиксирует имя проекта Compose. Без него Compose берёт именем каталог,
+# где лежит compose-файл, то есть "docker" — контейнеры и тома получили бы
+# чужие имена, а после переименования каталога сменились бы снова.
+name: max-bot-template
+
+services:
+  # Postgres нужен только при работе с extra `db`. Боту без БД сервис можно
+  # удалить вместе с depends_on и томом.
+  db:
+    profiles: ["db"]
+    image: ${POSTGRES_IMAGE:-harbor.volganet.ru/dockerhub-proxy/postgres:16-alpine}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bot}
+      POSTGRES_DB: ${POSTGRES_DB:-bot}
+    volumes:
+      - pgdata_local:/var/lib/postgresql/data
+    healthcheck:
+      # Бот стартует только после готовности БД — иначе первый запрос упадёт
+      # на «connection refused», пока Postgres поднимает кластер.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+      args:
+        INDEX_URL: ${INDEX_URL:-}
+        INSTALL_EXTRAS: ${INSTALL_EXTRAS:-}
+        BASE_IMAGE: ${BASE_IMAGE:-harbor.volganet.ru/dockerhub-proxy/python:3.12-slim-bookworm}
+        UV_IMAGE: ${UV_IMAGE:-harbor.volganet.ru/github-proxy/astral-sh/uv:latest}
+        USE_NEXUS_APT: ${USE_NEXUS_APT:-1}
+        # Локально совпадают с пользователем хоста, чтобы bind-mount ../logs
+        # был доступен на запись: UID=$(id -u) GID=$(id -g) make up-local
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    env_file: ../.env
+    environment:
+      BOT_MODE: ${BOT_MODE:-polling}
+    restart: unless-stopped
+    # Порт нужен только при BOT_MODE=webhook; в polling слушателя нет.
+    ports:
+      - "${PORT:-8081}:${PORT:-8081}"
+    volumes:
+      # bind-mount: логи видны прямо в каталоге проекта на хосте.
+      - ../logs:/app/logs
+
+volumes:
+  pgdata_local:

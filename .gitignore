@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+.eggs/
+
+# uv / virtualenv
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+.env.*.local
+docker/.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Pytest / coverage / линтеры
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Логи и runtime-данные
+*.log
+logs/
+outputs/
+*.sqlite
+*.db
+
+# Дампы БД (см. make dump)
+dump_*.sql
+dump_*.dump
+
+# Секреты
+settings.json
+credentials.json
+*.pem
+*.key
+
+# Сертификаты: реальные не коммитим (см. certs/README.md)
+certs/*.crt
+certs/*.pem
+
+# Бинарь uv для закрытого контура распаковывается сюда из архива
+build/uv/uv
+build/uv/uv-*/
