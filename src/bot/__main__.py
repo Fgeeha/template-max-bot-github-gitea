@@ -9,17 +9,20 @@ import asyncio
 import logging
 import signal
 
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from maxapi import Bot, Dispatcher
 from maxapi.enums.update import UpdateType
 from maxapi.exceptions.max import MaxApiError
 
 from bot.config import Settings, get_settings
 from bot.runtime import (
+    build_connection_properties,
     build_ssl_context,
     patch_api_rate_limit,
     patch_message_rate_limit,
-    patch_ssl_context,
 )
+from bot.webhook import BackgroundDispatcher, register_webhook_route
 
 logger = logging.getLogger(__name__)
 
@@ -41,44 +44,53 @@ def setup_logging(level: str) -> None:
     )
 
 
-def build_dispatcher(*, use_create_task: bool = False) -> Dispatcher:
-    """Создаёт диспетчер и регистрирует в нём всё middleware и хендлеры.
-
-    use_create_task: обрабатывать апдейты фоновой задачей, не задерживая ACK
-    платформе. Имеет смысл только в webhook-режиме.
-    """
+def build_dispatcher() -> Dispatcher:
+    """Создаёт диспетчер и регистрирует в нём всё middleware и хендлеры."""
     from bot.handlers import register_all
 
-    dispatcher = Dispatcher(use_create_task=use_create_task)
+    dispatcher = Dispatcher()
     register_all(dispatcher)
     return dispatcher
 
 
 def build_bot(settings: Settings) -> Bot:
     """Собирает клиента MAX API со всеми применёнными патчами."""
-    bot = Bot(token=settings.max_bot_token)
+    ssl_context = build_ssl_context(settings.max_ca_bundle)
+    bot = Bot(
+        token=settings.max_bot_token,
+        default_connection=build_connection_properties(ssl_context),
+    )
     # Домен API задаётся отдельно: конструктор Bot использует зашитый в
     # библиотеке адрес, который может отставать от актуального.
     bot.set_api_url(settings.max_api_base_url)
     patch_message_rate_limit(bot, max_calls=settings.max_api_message_rps)
 
-    ssl_context = build_ssl_context(settings.max_ca_bundle)
-    if ssl_context is not None:
-        patch_ssl_context(ssl_context)
-
     logger.info("MAX API URL: %s", settings.max_api_base_url)
     return bot
 
 
-def build_webhook_app(bot: Bot, dispatcher: Dispatcher, settings: Settings):  # type: ignore[no-untyped-def]
-    """Собирает FastAPI-приложение с маршрутом webhook и health-check."""
-    from fastapi import FastAPI, Request
-    from fastapi.responses import JSONResponse
+def build_webhook_app(
+    bot: Bot, dispatcher: Dispatcher, settings: Settings
+) -> tuple[FastAPI, BackgroundDispatcher]:
+    """Собирает FastAPI-приложение с маршрутом webhook и health-check.
+
+    Маршрут регистрируем свой (bot.webhook), а не `FastAPIMaxWebhook.setup()`:
+    штатный маршрут выполняет `dp.handle` прямо внутри HTTP-запроса и держит
+    соединение MAX открытым на всё время обработки — на всплеске сообщений
+    это упирается в лимит файловых дескрипторов. От библиотеки берём только
+    lifespan — он поднимает диспетчер.
+    """
     from maxapi.webhook.fastapi import FastAPIMaxWebhook
 
     webhook = FastAPIMaxWebhook(dp=dispatcher, bot=bot, secret=settings.webhook_secret)
     app = FastAPI(title="max-bot", lifespan=webhook.lifespan)
-    webhook.setup(app, path=settings.webhook_path)
+    background = BackgroundDispatcher(webhook, max_pending=settings.webhook_max_pending_updates)
+    register_webhook_route(
+        app,
+        background,
+        path=settings.webhook_path,
+        secret=settings.webhook_secret,
+    )
 
     @app.exception_handler(MaxApiError)
     async def _handle_api_error(request: Request, exc: MaxApiError) -> JSONResponse:
@@ -91,9 +103,11 @@ def build_webhook_app(bot: Bot, dispatcher: Dispatcher, settings: Settings):  # 
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
-        # Отвечаем 200 намеренно: на 5xx платформа будет ретраить апдейт,
-        # который всё равно упадёт — получим бесконечный цикл вместо одной
-        # записи в логе.
+        # Ошибки самой обработки апдейта сюда не доходят: она идёт в фоновой
+        # задаче (bot.webhook.BackgroundDispatcher), там своё логирование.
+        # Остаются ошибки маршрута — отвечаем 200 намеренно: на 5xx платформа
+        # будет ретраить заведомо битый апдейт, получим бесконечный цикл
+        # вместо одной записи в логе.
         logger.exception(
             "Необработанное исключение в webhook: %s %s", request.method, request.url.path
         )
@@ -102,16 +116,21 @@ def build_webhook_app(bot: Bot, dispatcher: Dispatcher, settings: Settings):  # 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
         """Проба живости для оркестратора и деплой-пайплайна."""
-        return JSONResponse({"status": "ok", "build": settings.build_tag})
+        return JSONResponse(
+            {
+                "status": "ok",
+                "build": settings.build_tag,
+                # Держится у потолка WEBHOOK_MAX_PENDING_UPDATES — обработка
+                # не успевает за потоком апдейтов.
+                "pending_updates": background.pending,
+            }
+        )
 
-    return app
+    return app, background
 
 
-async def run_webhook(bot: Bot, dispatcher: Dispatcher, settings: Settings) -> None:
-    """Регистрирует подписку в MAX и поднимает FastAPI + uvicorn."""
-    import uvicorn
-
-    logger.info("Регистрация webhook: %s", settings.webhook_url)
+async def register_webhook_subscription(bot: Bot, settings: Settings) -> None:
+    """Регистрирует подписку бота на апдейты в MAX."""
     try:
         await bot.subscribe_webhook(
             settings.webhook_url,
@@ -124,14 +143,32 @@ async def run_webhook(bot: Bot, dispatcher: Dispatcher, settings: Settings) -> N
         # сервер поднять всё равно нужно.
         logger.error("Не удалось зарегистрировать webhook: %s", exc)
 
-    app = build_webhook_app(bot, dispatcher, settings)
+
+async def serve_webhook(app: FastAPI, settings: Settings) -> None:
+    """Запускает uvicorn с ограничениями на приём соединений.
+
+    limit_concurrency/backlog/timeout_keep_alive заданы явно вместо значений
+    по умолчанию (backlog 2048): лишние соединения лучше отбить сразу, чем
+    держать открытыми до исчерпания дескрипторов.
+    """
+    import uvicorn
+
     config = uvicorn.Config(
         app=app,
         host="0.0.0.0",
         port=settings.port,
         log_level=settings.log_level.lower(),
+        limit_concurrency=settings.webhook_limit_concurrency,
+        backlog=settings.webhook_backlog,
+        timeout_keep_alive=settings.webhook_keepalive_timeout,
     )
-    logger.info("Режим webhook: 0.0.0.0:%s%s", settings.port, settings.webhook_path)
+    logger.info(
+        "Режим webhook: 0.0.0.0:%s%s (лимит запросов %s, очередь апдейтов %s)",
+        settings.port,
+        settings.webhook_path,
+        settings.webhook_limit_concurrency,
+        settings.webhook_max_pending_updates,
+    )
     await uvicorn.Server(config).serve()
 
 
@@ -170,9 +207,7 @@ async def _run() -> None:
 
     patch_api_rate_limit(settings.max_api_rps)
     bot = build_bot(settings)
-    dispatcher = build_dispatcher(
-        use_create_task=settings.use_webhook and settings.webhook_use_create_task
-    )
+    dispatcher = build_dispatcher()
 
     # Graceful shutdown: по SIGINT/SIGTERM останавливаем runner и закрываем
     # сессии, чтобы не терять апдейт «на полпути» и не оставлять соединения.
@@ -184,8 +219,11 @@ async def _run() -> None:
         except NotImplementedError:  # Windows
             pass
 
+    background: BackgroundDispatcher | None = None
     if settings.use_webhook:
-        runner = asyncio.create_task(run_webhook(bot, dispatcher, settings))
+        app, background = build_webhook_app(bot, dispatcher, settings)
+        await register_webhook_subscription(bot, settings)
+        runner = asyncio.create_task(serve_webhook(app, settings))
     else:
         runner = asyncio.create_task(run_polling(bot, dispatcher))
 
@@ -202,6 +240,11 @@ async def _run() -> None:
         await runner
     except asyncio.CancelledError:
         pass
+
+    # Сервер больше не принимает запросы — доводим до конца уже принятые
+    # апдейты, иначе сообщения потерялись бы между ACK и обработкой.
+    if background is not None:
+        await background.drain(settings.webhook_drain_timeout)
 
     await bot.close_session()
     if settings.database_url:

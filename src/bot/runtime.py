@@ -11,7 +11,9 @@ import asyncio
 import logging
 import ssl
 
+from aiohttp import TCPConnector
 from maxapi import Bot
+from maxapi.client.default import DefaultConnectionProperties
 from maxapi.exceptions.max import MaxApiError
 
 logger = logging.getLogger(__name__)
@@ -133,28 +135,19 @@ def build_ssl_context(ca_bundle: str | None) -> ssl.SSLContext | None:
     return context
 
 
-def patch_ssl_context(ssl_context: ssl.SSLContext) -> None:
-    """Подставляет свой SSL-контекст в aiohttp-сессию maxapi.
+def build_connection_properties(
+    ssl_context: ssl.SSLContext | None,
+) -> DefaultConnectionProperties | None:
+    """Собирает параметры соединения maxapi с нашим CA-bundle.
 
-    Нужно, когда цепочка сертификатов API подписана УЦ, которого нет в
-    системном хранилище (например, Минцифры РФ). Точка внедрения —
-    `Bot.ensure_session`: другого способа передать connector в maxapi нет.
+    Начиная с maxapi 1.2.0 свой connector передаётся штатно через
+    `Bot(default_connection=...)` — monkey-patch `Bot.ensure_session` не
+    нужен. Connector создаётся один раз на процесс: сессия maxapi живёт до
+    остановки бота, закрывается только в `close_session()`.
+
+    Returns:
+        None, если CA-bundle не задан (библиотека возьмёт свой CA-bundle).
     """
-    import aiohttp
-    from maxapi.bot import Bot as _Bot
-
-    async def _ensure_session(self: _Bot) -> aiohttp.ClientSession:
-        if not self.session or self.session.closed:
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-            extra = {k: v for k, v in self.default_connection.kwargs.items() if k != "connector"}
-            self.session = aiohttp.ClientSession(
-                base_url=self.api_url,
-                timeout=self.default_connection.timeout,
-                headers=self.headers,
-                connector=connector,
-                **extra,
-            )
-        return self.session
-
-    _Bot.ensure_session = _ensure_session  # type: ignore[method-assign]
-    logger.info("SSL-патч maxapi применён")
+    if ssl_context is None:
+        return None
+    return DefaultConnectionProperties(connector=TCPConnector(ssl=ssl_context))

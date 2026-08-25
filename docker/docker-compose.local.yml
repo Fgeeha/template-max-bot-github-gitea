@@ -45,6 +45,11 @@ services:
     environment:
       BOT_MODE: ${BOT_MODE:-polling}
     restart: unless-stopped
+    # Как в проде: запас по дескрипторам для всплеска соединений вебхука.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     # Порт нужен только при BOT_MODE=webhook; в polling слушателя нет.
     ports:
       - "${PORT:-8081}:${PORT:-8081}"

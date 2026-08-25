@@ -29,6 +29,13 @@ services:
     mem_reservation: 512m
     cpus: 2.0
     pids_limit: 256
+    # Лимит дескрипторов: по умолчанию контейнер получает soft-лимит демона
+    # (часто 1024). Всплеск входящих соединений вебхука упирается в него —
+    # "OSError: [Errno 24] Too many open files" в socket.accept().
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     # expose, а не ports: наружу бот публикуется реверс-прокси, напрямую порт
     # на хост не пробрасывается.
     expose:

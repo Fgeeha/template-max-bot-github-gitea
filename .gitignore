@@ -58,3 +58,10 @@ certs/*.pem
 # Бинарь uv для закрытого контура распаковывается сюда из архива
 build/uv/uv
 build/uv/uv-*/
+
+# Служебные артефакты AI-тулинга
+.agents/
+.claude-flow/
+.swarm/
+.mcp.json
+ruvector.db
