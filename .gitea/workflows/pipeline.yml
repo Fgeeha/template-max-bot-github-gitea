@@ -477,7 +477,15 @@ jobs:
           scp $SSH_OPTS "$SRC" "${PROD_USER}@${PROD_HOST}:${PROD_PATH}/docker-compose.prod.yml"
         shell: bash
 
-      - name: Деплой (pull + up -d)
+      # Команда собирается локально в переменную и передаётся ssh как аргумент
+      # bash -c '...' (однократно экранированный под ssh'овское наивное
+      # склеивание хвостовых argv через пробел) — НЕ через bash -s <<HEREDOC.
+      # bash -s читает heredoc как собственный stdin, после чего fd0 остаётся
+      # висеть на живом SSH-канале без данных, и docker compose pull внутри
+      # блокируется на нём навсегда без EOF и без ошибки. pull — отдельным
+      # шагом от up -d, чтобы сетевая часть (login, ретраи) была видна в CI
+      # отдельно.
+      - name: Docker login + pull образа на prod
         env:
           PROD_HOST: ${{ vars.PROD_HOST }}
           PROD_USER: ${{ vars.PROD_USER }}
@@ -490,8 +498,30 @@ jobs:
           PROD_USER="$(printf '%s' "${PROD_USER}" | tr -d '\r\n' | xargs)"
           PROD_HOST="$(printf '%s' "${PROD_HOST}" | tr -d '\r\n' | xargs)"
           PROD_PATH="$(printf '%s' "${PROD_PATH}" | tr -d '\r\n' | xargs)"
-          echo "Деплой ${VERSION} на ${PROD_USER}@${PROD_HOST}:${PROD_PATH}"
-          ssh -i ~/.ssh/id_deploy \
+          echo "Pull версии ${VERSION} на ${PROD_USER}@${PROD_HOST}:${PROD_PATH}"
+
+          REMOTE_CMD='set -euo pipefail
+          cd "$PROD_PATH"
+          n=1
+          until printf "%s" "$HARBOR_PASSWORD" | docker login "$HARBOR_REGISTRY" -u "$HARBOR_USERNAME" --password-stdin; do
+            if [ "$n" -ge 5 ]; then echo "login: не удалось за $n попыток" >&2; exit 1; fi
+            echo "Попытка $n/5 неудачна, повтор через $((5 * n))с..." >&2
+            sleep $((5 * n)); n=$((n + 1))
+          done
+          export IMAGE_TAG HARBOR_REGISTRY HARBOR_PROJECT HARBOR_IMAGE
+          n=1
+          until docker compose -f docker-compose.prod.yml pull; do
+            if [ "$n" -ge 5 ]; then echo "pull: не удалось за $n попыток" >&2; exit 1; fi
+            echo "Попытка $n/5 неудачна, повтор через $((5 * n))с..." >&2
+            sleep $((5 * n)); n=$((n + 1))
+          done
+          if [ -f .image_tag.current ]; then cp .image_tag.current .image_tag.previous; fi
+          echo "$IMAGE_TAG" > .image_tag.current
+          docker logout "$HARBOR_REGISTRY" || true
+          echo "Образ $IMAGE_TAG загружен"'
+          ESCAPED_CMD=$(printf '%s' "$REMOTE_CMD" | sed "s/'/'\\\\''/g")
+
+          ssh -n -i ~/.ssh/id_deploy \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=accept-new \
               -o UserKnownHostsFile=~/.ssh/known_hosts \
@@ -503,25 +533,49 @@ jobs:
               HARBOR_USERNAME="${HARBOR_USERNAME}" \
               HARBOR_PASSWORD="${HARBOR_PASSWORD}" \
               PROD_PATH="${PROD_PATH}" \
-              'bash -seo pipefail' <<'REMOTE'
-            set -euo pipefail
-            cd "${PROD_PATH}"
-            echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" \
-              -u "${HARBOR_USERNAME}" --password-stdin
+              "bash -c '${ESCAPED_CMD}'"
+        shell: bash
 
-            # Запоминаем предыдущий тег — на него откатится job rollback.
-            if [ -f .image_tag.current ]; then
-              cp .image_tag.current .image_tag.previous
-            fi
-            echo "${IMAGE_TAG}" > .image_tag.current
+      - name: Деплой на prod (up -d)
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          PROD_PATH: ${{ vars.PROD_PATH }}
+          VERSION: ${{ needs.release-image.outputs.version }}
+          GIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          PROD_USER="$(printf '%s' "${PROD_USER}" | tr -d '\r\n' | xargs)"
+          PROD_HOST="$(printf '%s' "${PROD_HOST}" | tr -d '\r\n' | xargs)"
+          PROD_PATH="$(printf '%s' "${PROD_PATH}" | tr -d '\r\n' | xargs)"
+          echo "Деплой на ${PROD_USER}@${PROD_HOST}:${PROD_PATH} версии ${VERSION}"
 
-            export IMAGE_TAG HARBOR_REGISTRY HARBOR_PROJECT HARBOR_IMAGE
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-            docker image prune -f >/dev/null 2>&1 || true
-            docker logout "${HARBOR_REGISTRY}" || true
-            echo "Развёрнута версия: ${IMAGE_TAG}"
-          REMOTE
+          REMOTE_CMD='set -euo pipefail
+          cd "$PROD_PATH"
+          export IMAGE_TAG HARBOR_REGISTRY HARBOR_PROJECT HARBOR_IMAGE
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          docker image prune -f >/dev/null 2>&1 || true
+          if [ -f .docker_up.current ]; then cp .docker_up.current .docker_up.previous; fi
+          echo "IMAGE_TAG=$IMAGE_TAG HARBOR_REGISTRY=$HARBOR_REGISTRY HARBOR_PROJECT=$HARBOR_PROJECT HARBOR_IMAGE=$HARBOR_IMAGE docker compose -f docker-compose.prod.yml up -d --remove-orphans" > .docker_up.current
+          printf "%s\t%s\t%s\t%s\t%s\n" "$(date -Is)" "$DEPLOY_KIND" "$IMAGE_TAG" "$GIT_SHA" "$RUN_ID" >> deploy-history.log
+          echo "Развёрнута версия: $IMAGE_TAG"'
+          ESCAPED_CMD=$(printf '%s' "$REMOTE_CMD" | sed "s/'/'\\\\''/g")
+
+          ssh -n -i ~/.ssh/id_deploy \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              "${PROD_USER}@${PROD_HOST}" \
+              IMAGE_TAG="${VERSION}" \
+              HARBOR_REGISTRY="${HARBOR_REGISTRY}" \
+              HARBOR_PROJECT="${HARBOR_PROJECT}" \
+              HARBOR_IMAGE="${HARBOR_IMAGE}" \
+              GIT_SHA="${GIT_SHA}" \
+              RUN_ID="${RUN_ID}" \
+              DEPLOY_KIND="deploy" \
+              PROD_PATH="${PROD_PATH}" \
+              "bash -c '${ESCAPED_CMD}'"
         shell: bash
 
       # Контейнер должен быть запущен и не уходить в рестарт-петлю.
@@ -599,48 +653,112 @@ jobs:
           chmod 600 ~/.ssh/id_deploy
         shell: bash
 
-      - name: Откатить на предыдущий тег
+      # Команды передаются ssh как аргумент bash -c '...' — см. комментарий
+      # у "Docker login + pull образа на prod" в job deploy. pull — отдельным
+      # шагом от up -d.
+      - name: Определить версию для отката
+        id: resolve_prev
         env:
           PROD_HOST: ${{ vars.PROD_HOST }}
           PROD_USER: ${{ vars.PROD_USER }}
           PROD_PATH: ${{ vars.PROD_PATH }}
-          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
-          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
         run: |
           set -euo pipefail
-          PROD_USER="$(printf '%s' "${PROD_USER}" | tr -d '\r\n' | xargs)"
-          PROD_HOST="$(printf '%s' "${PROD_HOST}" | tr -d '\r\n' | xargs)"
-          PROD_PATH="$(printf '%s' "${PROD_PATH}" | tr -d '\r\n' | xargs)"
-          ssh -i ~/.ssh/id_deploy \
+          PREV="$(ssh -n -i ~/.ssh/id_deploy \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=accept-new \
               -o UserKnownHostsFile=~/.ssh/known_hosts \
               "${PROD_USER}@${PROD_HOST}" \
+              "cat '${PROD_PATH}/.image_tag.previous'" 2>/dev/null || true)"
+          if [ -z "$PREV" ]; then
+            echo "Нет .image_tag.previous на хосте — откатывать не на что. Нужно ручное вмешательство." >&2
+            exit 1
+          fi
+          echo "Откат на ${PREV}"
+          echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Docker login + pull предыдущего образа на prod
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          PROD_PATH: ${{ vars.PROD_PATH }}
+          PREV: ${{ steps.resolve_prev.outputs.prev }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          REMOTE_CMD='set -euo pipefail
+          cd "$PROD_PATH"
+          n=1
+          until printf "%s" "$HARBOR_PASSWORD" | docker login "$HARBOR_REGISTRY" -u "$HARBOR_USERNAME" --password-stdin; do
+            if [ "$n" -ge 5 ]; then echo "login: не удалось за $n попыток" >&2; exit 1; fi
+            echo "Попытка $n/5 неудачна, повтор через $((5 * n))с..." >&2
+            sleep $((5 * n)); n=$((n + 1))
+          done
+          export IMAGE_TAG HARBOR_REGISTRY HARBOR_PROJECT HARBOR_IMAGE
+          n=1
+          until docker compose -f docker-compose.prod.yml pull; do
+            if [ "$n" -ge 5 ]; then echo "pull: не удалось за $n попыток" >&2; exit 1; fi
+            echo "Попытка $n/5 неудачна, повтор через $((5 * n))с..." >&2
+            sleep $((5 * n)); n=$((n + 1))
+          done
+          if [ -f .image_tag.current ]; then cp .image_tag.current .image_tag.previous; fi
+          echo "$IMAGE_TAG" > .image_tag.current
+          docker logout "$HARBOR_REGISTRY" || true
+          echo "Образ $IMAGE_TAG загружен"'
+          ESCAPED_CMD=$(printf '%s' "$REMOTE_CMD" | sed "s/'/'\\\\''/g")
+
+          ssh -n -i ~/.ssh/id_deploy \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              "${PROD_USER}@${PROD_HOST}" \
+              IMAGE_TAG="${PREV}" \
               HARBOR_REGISTRY="${HARBOR_REGISTRY}" \
               HARBOR_PROJECT="${HARBOR_PROJECT}" \
               HARBOR_IMAGE="${HARBOR_IMAGE}" \
               HARBOR_USERNAME="${HARBOR_USERNAME}" \
               HARBOR_PASSWORD="${HARBOR_PASSWORD}" \
               PROD_PATH="${PROD_PATH}" \
-              'bash -seo pipefail' <<'REMOTE'
-            set -euo pipefail
-            cd "${PROD_PATH}"
-            if [ ! -f .image_tag.previous ]; then
-              echo "Нет .image_tag.previous — откатывать не на что, нужно ручное вмешательство" >&2
-              exit 1
-            fi
-            PREV="$(cat .image_tag.previous)"
-            echo "Откат на ${PREV}"
-            echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" \
-              -u "${HARBOR_USERNAME}" --password-stdin
-            export IMAGE_TAG="${PREV}"
-            export HARBOR_REGISTRY HARBOR_PROJECT HARBOR_IMAGE
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-            echo "${PREV}" > .image_tag.current
-            docker logout "${HARBOR_REGISTRY}" || true
-            echo "Откат выполнен на ${PREV}"
-          REMOTE
+              "bash -c '${ESCAPED_CMD}'"
+        shell: bash
+
+      - name: Откат на предыдущий тег (up -d)
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          PROD_PATH: ${{ vars.PROD_PATH }}
+          PREV: ${{ steps.resolve_prev.outputs.prev }}
+          GIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          REMOTE_CMD='set -euo pipefail
+          cd "$PROD_PATH"
+          export IMAGE_TAG HARBOR_REGISTRY HARBOR_PROJECT HARBOR_IMAGE
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          docker image prune -f >/dev/null 2>&1 || true
+          if [ -f .docker_up.current ]; then cp .docker_up.current .docker_up.previous; fi
+          echo "IMAGE_TAG=$IMAGE_TAG HARBOR_REGISTRY=$HARBOR_REGISTRY HARBOR_PROJECT=$HARBOR_PROJECT HARBOR_IMAGE=$HARBOR_IMAGE docker compose -f docker-compose.prod.yml up -d --remove-orphans" > .docker_up.current
+          printf "%s\t%s\t%s\t%s\t%s\n" "$(date -Is)" "$DEPLOY_KIND" "$IMAGE_TAG" "$GIT_SHA" "$RUN_ID" >> deploy-history.log
+          echo "Развёрнута версия: $IMAGE_TAG"'
+          ESCAPED_CMD=$(printf '%s' "$REMOTE_CMD" | sed "s/'/'\\\\''/g")
+
+          ssh -n -i ~/.ssh/id_deploy \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              "${PROD_USER}@${PROD_HOST}" \
+              IMAGE_TAG="${PREV}" \
+              HARBOR_REGISTRY="${HARBOR_REGISTRY}" \
+              HARBOR_PROJECT="${HARBOR_PROJECT}" \
+              HARBOR_IMAGE="${HARBOR_IMAGE}" \
+              GIT_SHA="${GIT_SHA}" \
+              RUN_ID="${RUN_ID}" \
+              DEPLOY_KIND="rollback" \
+              PROD_PATH="${PROD_PATH}" \
+              "bash -c '${ESCAPED_CMD}'"
         shell: bash
 
       - name: Удалить SSH-ключ
