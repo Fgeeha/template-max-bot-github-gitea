@@ -240,11 +240,14 @@ POST-запроса), из-за чего на всплеске сообщени�
 кнопка и обработчик подхватят её сами:
 
 ```python
-Section(
-    id="contacts",
-    title="📞 Контакты",
-    text="Телефон: +7 000 000-00-00",
-),
+SECTIONS: tuple[Section, ...] = (
+    ...,  # существующие разделы
+    Section(
+        id="contacts",
+        title="📞 Контакты",
+        text="Телефон: +7 000 000-00-00",
+    ),
+)
 ```
 
 Есть тест, который проверяет, что каждая кнопка ведёт в существующий раздел.
@@ -315,7 +318,7 @@ make migrate                              # применить
 from bot.db.repositories import UserRepository
 from bot.db.session import session_scope
 
-async with session_scope() as session:      # commit при успехе, rollback при ошибке
+async with session_scope() as session:  # commit при успехе, rollback при ошибке
     await UserRepository(session).upsert(user_id=123, username="ivan")
 ```
 

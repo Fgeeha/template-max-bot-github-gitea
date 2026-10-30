@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Руководство администратора (всё — в личных сообщениях с ботом в MAX) — max-bot-template</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%239a3f12'/%3E%3Cpath d='M8 3.2a3 3 0 0 0-3 3c0 2.3 3 6.2 3 6.2s3-3.9 3-6.2a3 3 0 0 0-3-3zm0 4.2a1.2 1.2 0 1 1 0-2.4 1.2 1.2 0 0 1 0 2.4z' fill='%23fff'/%3E%3C/svg%3E"></head>
+<body><div class="layout">
+<button class="btn menu-btn" type="button" aria-label="Открыть меню разделов">☰ max-bot-template</button>
+<nav class="side" aria-label="Разделы документации">
+<a class="brand" href="index.html"><span class="logo">💬</span><span><b>max-bot-template</b><small>Документация · MAX</small></span></a>
+<label class="search"><input id="q" type="search" placeholder="Найти на странице  ( / )" aria-label="Найти на странице"><span class="hits" id="hits" aria-live="polite"></span></label>
+<h4>Работа с ботом</h4><ul><li><a href="admin-guide.html" class="active" title="Доступ и служебные команды"><span class="ic">🛠</span>Руководство администратора</a></li><li><a href="index.html" title="Docker, переменные, команды"><span class="ic">🚀</span>Запуск и настройка</a></li></ul><h4>Разработка</h4><ul></ul>
+<div class="tools"><button class="btn" id="theme" type="button">Тема</button></div>
+</nav>
+<main class="content"><div class="page"><article><span class="eyebrow">Работа с ботом</span><h1 id="руководство-администратора-всё-в-личных-сообщениях-с-ботом-в-max">Руководство администратора (всё — в личных сообщениях с ботом в MAX)<a class="anchor" href="#руководство-администратора-всё-в-личных-сообщениях-с-ботом-в-max" title="Permanent link">#</a></h1><details class="toc-inline"><summary>Содержание</summary><ul>
+<li><a href="#кто-администратор">Кто администратор</a></li>
+<li><a href="#режим-разработки-и-открытие-бота">Режим разработки и открытие бота</a></li>
+<li><a href="#служебные-команды">Служебные команды</a></li>
+<li><a href="#пользовательские-команды">Пользовательские команды</a></li>
+<li><a href="#если-что-то-не-так">Если что-то не так</a></li>
+</ul></details>
+<p>Заготовка: в боте на шаблоне дополните её своими сценариями. Ниже то, что
+есть в шаблоне из коробки.</p>
+<h2 id="кто-администратор">Кто администратор<a class="anchor" href="#кто-администратор" title="Permanent link">#</a></h2>
+<p>Администраторы задаются в <code>.env</code> списком числовых MAX user ID через запятую:</p>
+<pre><code class="language-bash">ADMIN_IDS=123456789, 987654321
+</code></pre>
+<p>Username не подходит — нужен именно числовой ID. Изменения вступают в силу
+после пересоздания контейнера (<code>make down-prod up-prod</code>; <code>docker compose
+restart</code> новый <code>.env</code> не читает).</p>
+<h2 id="режим-разработки-и-открытие-бота">Режим разработки и открытие бота<a class="anchor" href="#режим-разработки-и-открытие-бота" title="Permanent link">#</a></h2>
+<div class="table"><table>
+<thead>
+<tr>
+<th><code>PROD</code></th>
+<th>Кому отвечает бот</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>false</code> (по умолчанию)</td>
+<td>только <code>ADMIN_IDS</code>; остальные получают «Бот в разработке, скоро откроется.»</td>
+</tr>
+<tr>
+<td><code>true</code></td>
+<td>всем пользователям</td>
+</tr>
+</tbody>
+</table></div>
+<p>Недонастроенный бот так не уйдёт к пользователям случайно. В группах при
+<code>PROD=false</code> бот молчит, чтобы не спамить чат. Если <code>ADMIN_IDS</code> пуст, а
+<code>PROD=false</code>, бот не ответит никому — в логе будет предупреждение.</p>
+<h2 id="служебные-команды">Служебные команды<a class="anchor" href="#служебные-команды" title="Permanent link">#</a></h2>
+<div class="table"><table>
+<thead>
+<tr>
+<th>Команда</th>
+<th>Что показывает</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/v</code></td>
+<td>тег развёрнутой сборки — убедиться, что на проде та версия</td>
+</tr>
+<tr>
+<td><code>/status</code></td>
+<td>режим (polling/webhook), <code>PROD</code>, число администраторов, БД, метрики, сборку</td>
+</tr>
+</tbody>
+</table></div>
+<p>Секреты (токен, пароль БД) <code>/status</code> не выводит. Остальным пользователям эти
+команды не отвечают вовсе: ответ «недостаточно прав» сам выдал бы наличие
+скрытых функций.</p>
+<h2 id="пользовательские-команды">Пользовательские команды<a class="anchor" href="#пользовательские-команды" title="Permanent link">#</a></h2>
+<div class="table"><table>
+<thead>
+<tr>
+<th>Команда</th>
+<th>Что делает</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/start</code></td>
+<td>приветствие и главное меню</td>
+</tr>
+<tr>
+<td><code>/help</code></td>
+<td>справка</td>
+</tr>
+</tbody>
+</table></div>
+<p>На произвольный текст в личке бот возвращает главное меню; в группах на
+свободный текст не отвечает.</p>
+<h2 id="если-что-то-не-так">Если что-то не так<a class="anchor" href="#если-что-то-не-так" title="Permanent link">#</a></h2>
+<div class="table"><table>
+<thead>
+<tr>
+<th>Симптом</th>
+<th>Что проверить</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>бот отвечает «Бот в разработке»</td>
+<td><code>PROD=true</code> в <code>.env</code> и пересоздан ли контейнер</td>
+</tr>
+<tr>
+<td><code>/v</code> и <code>/status</code> молчат</td>
+<td>ваш числовой ID в <code>ADMIN_IDS</code></td>
+</tr>
+<tr>
+<td>на кнопку «Слишком часто, подождите секунду»</td>
+<td>сработал лимит: не чаще одного нажатия в 0,5 с</td>
+</tr>
+<tr>
+<td>версия в <code>/v</code> старая</td>
+<td>деплой не прошёл — см. раздел CI/CD в <a href="index.html">README</a></td>
+</tr>
+</tbody>
+</table></div><nav class="pager" aria-label="Соседние страницы"><a class="next" href="index.html"><small>Далее →</small>Запуск и настройка</a></nav></article><aside class="otp" aria-label="На этой странице"><b>На этой странице</b><ul>
+<li><a href="#кто-администратор">Кто администратор</a></li>
+<li><a href="#режим-разработки-и-открытие-бота">Режим разработки и открытие бота</a></li>
+<li><a href="#служебные-команды">Служебные команды</a></li>
+<li><a href="#пользовательские-команды">Пользовательские команды</a></li>
+<li><a href="#если-что-то-не-так">Если что-то не так</a></li>
+</ul></aside></div>
+<footer>Собрано из Markdown 30.10.2026 08:33 · <code>make docs</code> · источник — <code>docs/*.md</code></footer></main>
+</div><button class="btn top" type="button" aria-label="Наверх">↑ Наверх</button>
+<script>
+(()=>{
+const root=document.documentElement,store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},
+set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+const saved=store.get('docs-theme');if(saved)root.dataset.theme=saved;
+const tb=document.getElementById('theme');
+if(tb){const dark=()=>root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme:dark)').matches;
+const label=()=>{tb.textContent=dark()?'☀ Светлая':'☾ Тёмная'};label();
+tb.onclick=()=>{root.dataset.theme=dark()?'light':'dark';store.set('docs-theme',root.dataset.theme);label()}}
+const q=document.getElementById('q'),hitsEl=document.getElementById('hits');let marks=[],cur=-1;
+function clearMarks(){document.querySelectorAll('article mark').forEach(m=>m.replaceWith(...m.childNodes));
+document.querySelector('article').normalize();marks=[];cur=-1}
+function go(i){if(!marks.length)return;if(cur>=0)marks[cur].classList.remove('current');cur=(i+marks.length)%marks.length;
+marks[cur].classList.add('current');marks[cur].scrollIntoView({block:'center'});
+hitsEl.textContent=(cur+1)+' из '+marks.length+' · Enter — дальше'}
+if(q){q.addEventListener('input',()=>{clearMarks();const v=q.value.trim().toLowerCase();hitsEl.textContent='';
+if(v.length<2)return;const w=document.createTreeWalker(document.querySelector('article'),NodeFilter.SHOW_TEXT);
+const nodes=[];let n;while(n=w.nextNode()){if(n.parentElement.closest('pre .copy'))continue;
+if(n.nodeValue.toLowerCase().includes(v))nodes.push(n)}
+nodes.slice(0,300).forEach(t=>{let node=t;let i;while(node&&(i=node.nodeValue.toLowerCase().indexOf(v))>-1){
+const r=document.createRange();r.setStart(node,i);r.setEnd(node,i+v.length);const m=document.createElement('mark');
+r.surroundContents(m);marks.push(m);node=m.nextSibling&&m.nextSibling.nodeType===3?m.nextSibling:null}});
+if(marks.length)go(0);else hitsEl.textContent='Не найдено'});
+q.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();go(cur+(e.shiftKey?-1:1))}
+if(e.key==='Escape'){q.value='';clearMarks();hitsEl.textContent=''}})}
+document.addEventListener('keydown',e=>{if(e.key==='/'&&document.activeElement!==q&&q){e.preventDefault();q.focus()}});
+document.querySelectorAll('article pre').forEach(pre=>{const b=document.createElement('button');
+b.className='btn copy';b.type='button';b.textContent='Копировать';b.onclick=()=>{
+const t=pre.querySelector('code').innerText;const done=()=>{b.textContent='Скопировано';setTimeout(()=>b.textContent='Копировать',1500)};
+if(navigator.clipboard)navigator.clipboard.writeText(t).then(done,()=>{});};pre.appendChild(b)});
+const links=[...document.querySelectorAll('.otp a')],heads=links.map(a=>document.getElementById(decodeURIComponent(a.hash.slice(1)))).filter(Boolean);
+if(heads.length&&'IntersectionObserver' in window){const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
+links.forEach(a=>a.classList.toggle('on',decodeURIComponent(a.hash.slice(1))===e.target.id))}})},{rootMargin:'0px 0px -70% 0px'});heads.forEach(h=>io.observe(h))}
+const side=document.querySelector('.side'),mb=document.querySelector('.menu-btn');
+if(mb){mb.onclick=e=>{e.stopPropagation();side.classList.toggle('open')};
+document.addEventListener('click',e=>{if(side.classList.contains('open')&&!side.contains(e.target))side.classList.remove('open')})}
+const up=document.querySelector('.top');if(up){addEventListener('scroll',()=>up.classList.toggle('show',scrollY>900),{passive:true});
+up.onclick=()=>scrollTo({top:0,behavior:'smooth'})}
+})();
+</script></body></html>

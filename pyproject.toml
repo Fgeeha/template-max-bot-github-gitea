@@ -10,9 +10,9 @@ requires-python = ">=3.12"
 # Базовые зависимости — нужны любому боту на этом шаблоне.
 # Всё, что нужно не всем (БД, метрики, почта), вынесено в optional-dependencies.
 dependencies = [
-    "maxapi[fastapi]>=1.2.0",
-    "pydantic-settings>=2.14.0",
-    "uvicorn>=0.20.0",
+    "maxapi[fastapi]>=1.2.3",
+    "pydantic-settings>=2.16.2",
+    "uvicorn>=0.54.0",
     "httpx>=0.28.1",
 ]
 
@@ -20,13 +20,13 @@ dependencies = [
 # Слой БД. Ставится только если боту нужно хранить состояние:
 #   uv sync --extra db
 db = [
-    "sqlalchemy[asyncio]>=2.0",
-    "asyncpg>=0.29",
-    "alembic>=1.13",
+    "sqlalchemy[asyncio]>=2.1.6",
+    "asyncpg>=0.32.0",
+    "alembic>=1.20.1",
 ]
 # Prometheus-метрики на отдельном порту (METRICS_ADDR).
 metrics = [
-    "prometheus-client>=0.20",
+    "prometheus-client>=0.26.0",
 ]
 
 [project.scripts]
@@ -41,11 +41,11 @@ packages = ["src/bot"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.6",
-    "pre-commit>=3.7",
-    "respx>=0.21",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
+    "ruff>=0.17.3",
+    "pre-commit>=4.7.0",
+    "respx>=0.23.1",
     "httpx>=0.28.1",
 ]
 

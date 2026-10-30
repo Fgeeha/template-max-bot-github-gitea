@@ -28,7 +28,7 @@ GITEA_URL := https://gitea.volganet.ru
 
 .PHONY: help init install install-all run lint format test check \
         precommit up-local down-local restart-local logs \
-        up-prod down-prod migrate migration dump restore clean
+        up-prod down-prod migrate migration dump restore docs clean
 
 help: ## Показать список целей
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) \
@@ -119,6 +119,9 @@ restore: ## Восстановить БД из дампа: make restore f=backup
 		'pg_restore --clean --if-exists --no-owner -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < $(f)
 
 # --- Прочее -----------------------------------------------------------------
+
+docs: ## Собрать HTML-документацию в docs/html (открыть docs/html/index.html)
+	uv run --with markdown python scripts/build_docs.py
 
 clean: ## Удалить кэши и временные артефакты
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

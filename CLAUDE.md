@@ -41,6 +41,7 @@ make run            # запуск бота локально (polling)
 make lint           # ruff check src tests
 make format          # ruff check --fix + ruff format
 make test           # pytest (герметичные тесты, без сети и без .env)
+make docs          # docs/*.md + README.md → docs/html (HTML не править руками)
 make check           # lint + test + ruff format --check — перед коммитом
 ```
 

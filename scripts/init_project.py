@@ -31,6 +31,7 @@ TARGET_FILES = (
     "docker/docker-compose.prod.yml",
     ".gitea/workflows/pipeline.yml",
     "README.md",
+    "scripts/build_docs.py",
 )
 
 SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,48}[a-z0-9]$")
