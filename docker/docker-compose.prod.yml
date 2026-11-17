@@ -5,6 +5,33 @@
 name: max-bot-template
 
 services:
+  # Postgres хранит разделы меню, администраторов, статистику и журнал.
+  # Наружу не публикуется.
+  db:
+    image: ${POSTGRES_IMAGE:-harbor.volganet.ru/dockerhub-proxy/postgres:16-alpine}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}
+      POSTGRES_DB: ${POSTGRES_DB:-bot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Уникальное имя хоста: бот подключён ещё и к общей maxbots-network, и
+    # короткое «db» могло бы совпасть с базой другого бота этой сети.
+    networks:
+      default:
+        aliases:
+          - max-bot-template-db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    mem_limit: 768m
+    mem_reservation: 256m
+    cpus: 1.0
+    pids_limit: 128
+
   bot:
     image: ${HARBOR_REGISTRY:-harbor.volganet.ru}/${HARBOR_PROJECT:-bothub-private}/${HARBOR_IMAGE:-max-bot-template}:${IMAGE_TAG:-latest}
     # build оставлен для аварийной локальной пересборки прод-конфигурации;
@@ -23,6 +50,11 @@ services:
       # Тег образа попадает внутрь процесса — команда /v показывает,
       # что развёрнуто на самом деле.
       BUILD_TAG: ${IMAGE_TAG:-}
+      # POSTGRES_PASSWORD подставляется как есть — без символов @ : / ? #.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-bot}:${POSTGRES_PASSWORD}@max-bot-template-db:5432/${POSTGRES_DB:-bot}
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
     # Лимиты: бот не должен утащить хост за собой при утечке или флуде.
     mem_limit: 2g
@@ -40,7 +72,9 @@ services:
     # на хост не пробрасывается.
     expose:
       - "${PORT:-8081}"
+    # default — сеть с db; без явного default имя базы не резолвится.
     networks:
+      default:
       maxbots-network:
         aliases:
           - max-bot
@@ -64,6 +98,7 @@ services:
 
 volumes:
   botlogs:
+  pgdata:
 
 networks:
   maxbots-network:

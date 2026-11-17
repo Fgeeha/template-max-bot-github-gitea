@@ -1,11 +1,12 @@
 """Инлайн-клавиатуры бота."""
 
-from bot.keyboards.callbacks import BackPayload, MenuPayload
-from bot.keyboards.menus import back_keyboard, main_menu
+from bot.keyboards.callbacks import AdminAction, AdminPayload, SectionPayload
+from bot.keyboards.menus import admin_keyboard, section_keyboard
 
 __all__ = [
-    "BackPayload",
-    "MenuPayload",
-    "back_keyboard",
-    "main_menu",
+    "AdminAction",
+    "AdminPayload",
+    "SectionPayload",
+    "admin_keyboard",
+    "section_keyboard",
 ]

@@ -20,7 +20,10 @@ CI/CD под <strong>GitHub Actions</strong> и <strong>Gitea Actions</strong>. 
 <p>Шаблон закрывает то, что в каждом новом боте приходится писать заново:
 ограничение частоты запросов к API, корректное завершение процесса, разбор
 конфигурации с проверками, режимы polling/webhook, сборка образа и деплой с
-откатом.</p>
+откатом. Из коробки это бот-визитка: дерево разделов меню (текст, картинка,
+кнопка-ссылка) целиком правится в <strong>админке внутри MAX</strong> — команда <code>/admin</code>,
+без правки кода и передеплоя. Как пользоваться админкой —
+<a href="admin-guide.html">руководство администратора</a>.</p>
 <hr />
 <h2 id="содержание">Содержание<a class="anchor" href="#содержание" title="Permanent link">#</a></h2>
 <ul>
@@ -31,6 +34,7 @@ CI/CD под <strong>GitHub Actions</strong> и <strong>Gitea Actions</strong>. 
 <li><a href="#конфигурация">Конфигурация</a></li>
 <li><a href="#режимы-работы-polling-и-webhook">Режимы работы: polling и webhook</a></li>
 <li><a href="#уровни-доступа">Уровни доступа</a></li>
+<li><a href="#админка-в-max">Админка в MAX</a></li>
 <li><a href="#как-добавить-функциональность">Как добавить функциональность</a></li>
 <li><a href="#база-данных">База данных</a></li>
 <li><a href="#метрики">Метрики</a></li>
@@ -80,12 +84,36 @@ CI/CD под <strong>GitHub Actions</strong> и <strong>Gitea Actions</strong>. 
 <td>✅</td>
 </tr>
 <tr>
-<td>Команды <code>/start</code>, <code>/help</code>, <code>/v</code>, <code>/status</code></td>
+<td>Разделы меню в БД: текст, картинка, кнопка-ссылка, «Назад», экран меняется в том же сообщении</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Админка в MAX (<code>/admin</code>): дерево разделов, предпросмотр, порядок, удаление</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Администраторы: владельцы из <code>.env</code> + добавленные в админке</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Анонимная статистика открытий разделов</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Выгрузка и загрузка разделов JSON-файлом</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Журнал изменений админки</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Команды <code>/start</code>, <code>/id</code>, <code>/admin</code>, <code>/v</code>, <code>/status</code></td>
 <td>✅</td>
 </tr>
 <tr>
 <td>Postgres + SQLAlchemy async + Alembic</td>
-<td>опционально (<code>--extra db</code>)</td>
+<td>✅</td>
 </tr>
 <tr>
 <td>Prometheus-метрики</td>
@@ -108,22 +136,25 @@ CI/CD под <strong>GitHub Actions</strong> и <strong>Gitea Actions</strong>. 
 <td>✅</td>
 </tr>
 <tr>
-<td>Тесты (30 шт.)</td>
+<td>Герметичные тесты (SQLite в памяти, без сети)</td>
 <td>✅</td>
 </tr>
 </tbody>
 </table></div>
 <p><strong>Стек:</strong> Python 3.12, <a href="https://pypi.org/project/maxapi/">maxapi</a>, pydantic-settings,
-FastAPI + uvicorn (webhook), SQLAlchemy 2 + asyncpg + Alembic (опционально),
+FastAPI + uvicorn (webhook), SQLAlchemy 2 + asyncpg + Alembic,
 uv, ruff, pytest, Docker.</p>
 <hr />
 <h2 id="быстрый-старт">Быстрый старт<a class="anchor" href="#быстрый-старт" title="Permanent link">#</a></h2>
 <pre><code class="language-bash">cp .env.example .env          # задать MAX_BOT_TOKEN и ADMIN_IDS
 make install                  # uv sync
-make run                      # запуск в режиме polling
+make up-local-db              # Postgres в Docker на 127.0.0.1:5433
+make run                      # миграции + запуск в режиме polling
 </code></pre>
-<p>Токен бота выдаёт <code>@masterbot</code> в мессенджере MAX. Свой <code>user_id</code> можно узнать
-у <code>@userinfobot</code>.</p>
+<p>Или всё в Docker: <code>make up-local</code> (бот и Postgres, миграции при старте
+контейнера). Токен бота выдаёт <code>@masterbot</code> в мессенджере MAX. Свой <code>user_id</code>
+бот покажет по команде <code>/id</code> — впишите его в <code>ADMIN_IDS</code> и перезапустите.
+Затем <code>/admin</code> в личке с ботом.</p>
 <p>По умолчанию <code>PROD=false</code> — бот отвечает только тем, чьи id перечислены в
 <code>ADMIN_IDS</code>. Это защита от преждевременного выхода к пользователям: пока бот
 не настроен, посторонний увидит заглушку.</p>
@@ -141,8 +172,10 @@ make run                      # запуск в режиме polling
 <p>Неинтерактивно:</p>
 <pre><code class="language-bash">uv run python scripts/init_project.py --name support-max-bot --description &quot;Бот техподдержки&quot;
 </code></pre>
-<p>После инициализации остаётся заменить разделы меню в
-<code>src/bot/keyboards/menus.py</code> и текст приветствия в <code>src/bot/handlers/start.py</code>.</p>
+<p>После инициализации разделы и приветствие задаются в админке (<code>/admin</code>).
+Стартовое демо-наполнение — <code>SEED</code> в начальной миграции
+<code>migrations/versions/*_initial.py</code>; его можно заменить своим до первого
+деплоя.</p>
 <hr />
 <h2 id="структура">Структура<a class="anchor" href="#структура" title="Permanent link">#</a></h2>
 <pre><code>src/bot/
@@ -152,18 +185,23 @@ make run                      # запуск в режиме polling
 ├── metrics.py           # Prometheus (опционально)
 ├── handlers/            # обработчики событий
 │   ├── __init__.py      #   регистрация — порядок важен, см. комментарий
-│   ├── start.py         #   /start и bot_started
-│   ├── menu.py          #   /help, callback'и, свободный текст
-│   └── admin.py         #   /v, /status — только для ADMIN_IDS
+│   ├── start.py         #   /start, /id и bot_started
+│   ├── menu.py          #   разделы для пользователя, правка сообщения на месте
+│   ├── admin.py         #   роли (is_owner/is_admin), /v, /status
+│   ├── editor.py        #   админка разделов: /admin, кнопки a:…, ожидаемый ввод
+│   ├── screens.py       #   экран раздела в админке, строки журнала
+│   ├── tools.py         #   админы, статистика, файл разделов, журнал
+│   ├── inputs.py        #   проверка ввода админки и файла импорта
+│   └── pending.py       #   кто какой ввод должен прислать
 ├── keyboards/
-│   ├── callbacks.py     #   типизированные payload'ы кнопок
-│   └── menus.py         #   разделы меню (данные, а не код)
+│   ├── callbacks.py     #   типизированные payload'ы кнопок (s:…, a:…)
+│   └── menus.py         #   клавиатуры пользователя и админки
 ├── middlewares/
 │   ├── maintenance.py   #   гейт доступа
 │   └── throttling.py    #   лимит событий на пользователя
-└── db/                  # опционально, только при DATABASE_URL
+└── db/
     ├── session.py       #   движок и фабрика сессий
-    ├── models.py        #   модели SQLAlchemy
+    ├── models.py        #   sections, staff, section_views, audit_log
     └── repositories/    #   весь SQL живёт здесь
 
 docker/                  # Dockerfile + compose для local и prod
@@ -248,7 +286,27 @@ build/uv/                # бинарь uv для раннера закрыто�
 <tr>
 <td><code>DATABASE_URL</code></td>
 <td>—</td>
-<td>DSN Postgres; без неё слой БД не поднимается</td>
+<td><strong>Обязательна.</strong> DSN Postgres (<code>postgresql+asyncpg://…</code>)</td>
+</tr>
+<tr>
+<td><code>POSTGRES_PASSWORD</code></td>
+<td><code>bot</code></td>
+<td>Пароль Postgres в compose; на проде обязателен</td>
+</tr>
+<tr>
+<td><code>STATS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Записывать открытия разделов</td>
+</tr>
+<tr>
+<td><code>STATS_SALT</code></td>
+<td>пусто</td>
+<td>Секрет хеша посетителей; пусто — <code>MAX_BOT_TOKEN</code></td>
+</tr>
+<tr>
+<td><code>DISPLAY_UTC_OFFSET</code></td>
+<td><code>3</code></td>
+<td>Часовой пояс времени в админке, часов от UTC</td>
 </tr>
 <tr>
 <td><code>METRICS_ENABLED</code></td>
@@ -303,7 +361,7 @@ POST-запроса), из-за чего на всплеске сообщени�
 <ol>
 <li>
 <p><strong>Maintenance-гейт</strong> (<code>middlewares/maintenance.py</code>) — при <code>PROD=false</code>
-   пропускает только <code>ADMIN_IDS</code>. Работает как outer middleware, то есть до
+   пропускает только владельцев (<code>ADMIN_IDS</code>). Работает как outer middleware, то есть до
    фильтров: перехватывает сообщения, нажатия кнопок и <code>bot_started</code> одним
    кодом. В группах при блокировке молчит — отвечать на каждое упоминание
    значит спамить чат.</p>
@@ -315,26 +373,19 @@ POST-запроса), из-за чего на всплеске сообщени�
    честного распределённого лимита нужен Redis.</p>
 </li>
 <li>
-<p><strong>Декоратор <code>admin_only</code></strong> (<code>handlers/admin.py</code>) — служебные команды.
-   Неадминам такие команды не отвечают вовсе: сообщение «недостаточно прав»
-   само по себе раскрывает наличие скрытых функций.</p>
+<p><strong>Роли админки</strong> (<code>handlers/admin.py</code>): <code>is_owner</code> — <code>ADMIN_IDS</code> из
+   <code>.env</code>, права не зависят от БД, поэтому без администраторов бот не
+   остаётся; <code>is_admin</code> — владелец или запись в таблице <code>staff</code>, читается из
+   БД на каждом событии (отзыв действует сразу). Добавлять и отзывать
+   администраторов может только владелец. Декоратор <code>admin_only</code> закрывает
+   служебные команды: неадминам они не отвечают вовсе — сообщение
+   «недостаточно прав» само раскрывает наличие скрытых функций.</p>
 </li>
 </ol>
 <hr />
 <h2 id="как-добавить-функциональность">Как добавить функциональность<a class="anchor" href="#как-добавить-функциональность" title="Permanent link">#</a></h2>
 <h3 id="новый-раздел-меню">Новый раздел меню<a class="anchor" href="#новый-раздел-меню" title="Permanent link">#</a></h3>
-<p>Достаточно дописать запись в <code>SECTIONS</code> (<code>src/bot/keyboards/menus.py</code>) —
-кнопка и обработчик подхватят её сами:</p>
-<pre><code class="language-python">SECTIONS: tuple[Section, ...] = (
-    ...,  # существующие разделы
-    Section(
-        id=&quot;contacts&quot;,
-        title=&quot;📞 Контакты&quot;,
-        text=&quot;Телефон: +7 000 000-00-00&quot;,
-    ),
-)
-</code></pre>
-<p>Есть тест, который проверяет, что каждая кнопка ведёт в существующий раздел.</p>
+<p>Через админку: <code>/admin</code> → <strong>➕ Добавить подраздел</strong>. Код не меняется.</p>
 <h3 id="новая-команда">Новая команда<a class="anchor" href="#новая-команда" title="Permanent link">#</a></h3>
 <pre><code class="language-python"># src/bot/handlers/my_feature.py
 from maxapi import Dispatcher
@@ -353,39 +404,57 @@ async def on_my_command(event: MessageCreated) -&gt; None:
 <code>menu.register(dp)</code>, иначе catch-all на свободный текст перехватит команду
 раньше.</p>
 <h3 id="новый-тип-кнопки">Новый тип кнопки<a class="anchor" href="#новый-тип-кнопки" title="Permanent link">#</a></h3>
-<p>Опишите payload классом в <code>keyboards/callbacks.py</code> (по образцу <code>MenuPayload</code>)
-и обработайте его в <code>handlers/menu.py:on_callback</code>. Формат payload задан в
+<p>Опишите payload классом в <code>keyboards/callbacks.py</code> (по образцу <code>SectionPayload</code>)
+и обработайте его отдельным хендлером до <code>menu.register(dp)</code>: у <code>menu</code> callback
+без фильтра и забирает всё, что не перехватили раньше. Формат payload задан в
 одном месте намеренно: иначе рассинхрон между кнопкой и её обработчиком
 всплывает только в рантайме, у пользователя.</p>
 <hr />
+<h2 id="админка-в-max">Админка в MAX<a class="anchor" href="#админка-в-max" title="Permanent link">#</a></h2>
+<p>Весь пользовательский контент — дерево <code>sections</code> в Postgres. Корень — главное
+меню: его текст — приветствие на <code>/start</code>, дочерние разделы — кнопки. Раздел
+с <code>url</code> — кнопка-ссылка наружу; <code>image_token</code> — картинка над текстом (токен
+фото, присланного в админку: MAX разрешает отправлять то же вложение
+повторно, файл бот не хранит).</p>
+<ul>
+<li><strong>Пользователь</strong> (<code>handlers/menu.py</code>): кнопка <code>s:&lt;id&gt;</code> меняет то же
+  сообщение (<code>show_in_place</code>), «Назад» — кнопка родителя. Новое сообщение
+  шлётся, только если править нечего или MAX ответил 4xx; на 5xx — нет, правка
+  могла пройти после ретраев. Кнопка удалённого раздела даёт главное меню.</li>
+<li><strong>Админка</strong> (<code>handlers/editor.py</code>): кнопки <code>a:&lt;действие&gt;:&lt;цель&gt;</code>, права
+  проверяются на каждом нажатии. Название, текст, ссылку, картинку и файл
+  админ присылает следующим сообщением (<code>pending.waiting</code>, только из лички,
+  команды за ввод не считаются). Ожидание хранится в памяти процесса: при
+  рестарте сбрасывается, при нескольких репликах нужна таблица.</li>
+<li><strong>Инструменты</strong> (<code>handlers/tools.py</code>): администраторы, статистика
+  (<code>section_views</code>, HMAC-хеш вместо user_id, админы не считаются), выгрузка и
+  загрузка дерева JSON-файлом с проверкой как у ручного ввода, журнал
+  (<code>audit_log</code>, пишется в транзакции правки).</li>
+</ul>
+<p>Лимиты MAX: подпись кнопки до 64 символов, сообщение до 4000, ссылка до 2048,
+до 30 рядов кнопок — поэтому подразделов не больше <code>MAX_CHILDREN = 24</code>.</p>
+<hr />
 <h2 id="база-данных">База данных<a class="anchor" href="#база-данных" title="Permanent link">#</a></h2>
-<p>Слой БД опционален. Бот без состояния работает без него — каталог <code>src/bot/db/</code>
-и <code>migrations/</code> можно удалить целиком.</p>
-<h3 id="включение">Включение<a class="anchor" href="#включение" title="Permanent link">#</a></h3>
-<pre><code class="language-bash">uv sync --extra db
-</code></pre>
-<pre><code class="language-bash"># .env
-DATABASE_URL=postgresql+asyncpg://bot:bot@db:5432/bot
-</code></pre>
-<p>Драйвер обязательно асинхронный (<code>+asyncpg</code>) — синхронный проверяется при
-старте и отклоняется.</p>
-<h3 id="работа-с-миграциями">Работа с миграциями<a class="anchor" href="#работа-с-миграциями" title="Permanent link">#</a></h3>
+<p>Postgres обязателен: в нём разделы, администраторы, статистика и журнал.
+Драйвер — асинхронный (<code>+asyncpg</code>), синхронный DSN отклоняется при старте.
+Контейнер бота перед запуском выполняет <code>alembic upgrade head</code>: свежая база
+получает схему и демо-разделы, существующая — только новые ревизии.</p>
 <pre><code class="language-bash">make up-local-db                          # поднять Postgres в Docker
-make migration m=&quot;добавил таблицу users&quot;  # создать ревизию
+make migration m=&quot;добавил таблицу&quot;        # создать ревизию
 make migrate                              # применить
 </code></pre>
 <p><code>alembic.ini</code> не содержит DSN — он берётся из настроек приложения, чтобы
-креды не жили в двух местах.</p>
-<h3 id="использование">Использование<a class="anchor" href="#использование" title="Permanent link">#</a></h3>
-<pre><code class="language-python">from bot.db.repositories import UserRepository
+креды не жили в двух местах. Весь SQL — в <code>db/repositories/</code>; обработчики к
+сессии напрямую не ходят:</p>
+<pre><code class="language-python">from bot.db.repositories import SectionRepository
 from bot.db.session import session_scope
 
 async with session_scope() as session:  # commit при успехе, rollback при ошибке
-    await UserRepository(session).upsert(user_id=123, username=&quot;ivan&quot;)
+    root = await SectionRepository(session).root()
 </code></pre>
-<p>Весь SQL держится в репозиториях. Обработчики к сессии напрямую не ходят:
-иначе запросы расползаются по слоям и их невозможно ни переиспользовать, ни
-протестировать отдельно.</p>
+<p>В проде база видна боту по уникальному алиасу <code>max-bot-template-db</code>: бот
+подключён ещё и к общей сети <code>maxbots-network</code>, где короткое имя <code>db</code> могло
+бы совпасть с базой другого бота.</p>
 <hr />
 <h2 id="метрики">Метрики<a class="anchor" href="#метрики" title="Permanent link">#</a></h2>
 <pre><code class="language-bash">uv sync --extra metrics
@@ -420,7 +489,7 @@ Prometheus изнутри сети. Счётчики описаны в <code>src
 </tr>
 <tr>
 <td><code>make run</code></td>
-<td>Запустить бота локально</td>
+<td>Миграции и запуск бота локально</td>
 </tr>
 <tr>
 <td><code>make lint</code></td>
@@ -444,11 +513,11 @@ Prometheus изнутри сети. Счётчики описаны в <code>src
 </tr>
 <tr>
 <td><code>make up-local</code></td>
-<td>Поднять бота в Docker</td>
+<td>Поднять бота и Postgres в Docker</td>
 </tr>
 <tr>
 <td><code>make up-local-db</code></td>
-<td>Поднять бота вместе с Postgres</td>
+<td>Поднять только Postgres (для <code>make run</code>)</td>
 </tr>
 <tr>
 <td><code>make down-local</code></td>
@@ -574,8 +643,16 @@ make up-local
 <h2 id="тесты">Тесты<a class="anchor" href="#тесты" title="Permanent link">#</a></h2>
 <pre><code class="language-bash">make test
 </code></pre>
-<p>30 тестов: разбор и валидация конфигурации, payload'ы кнопок, ограничитель
-частоты, throttling-middleware, нарезка длинных сообщений.</p>
+<p>Разбор и валидация конфигурации, payload'ы кнопок, ограничитель частоты,
+throttling, очередь вебхука, репозиторий разделов, сценарии админки
+(<code>tests/test_editor_flow.py</code>, картинки — <code>tests/test_editor_images.py</code>) и инструментов (<code>tests/test_tools.py</code>):
+администраторы, статистика, экспорт/импорт, журнал.</p>
+<p>Хендлеры вызываются напрямую с заглушками событий (<code>FakeMessage</code>,
+<code>FakeCallback</code>), maxapi-диспетчер не мокается. БД — SQLite в памяти из фикстуры
+<code>sessionmaker</code> (с <code>PRAGMA foreign_keys</code>, ради каскада); фикстура <code>db</code> подменяет
+<code>bot.db.session.get_sessionmaker</code>, поэтому <code>session_scope</code> во всех модулях
+идёт в неё, а не в Postgres. Миграции на SQLite не прогоняются: схему
+проверяет <code>alembic check</code> против Postgres.</p>
 <p>Тесты герметичны: в сеть не ходят, реальный токен не используют, локальный
 <code>.env</code> игнорируют (иначе они падали бы только у того разработчика, у кого
 файл заполнен иначе).</p>
@@ -621,7 +698,7 @@ make up-local
 <p>Разделы меню, тексты и логика в шаблоне демонстрационные — заменяйте их своими.
 Инфраструктура (конфигурация, лимиты, режимы, сборка, деплой) переносится как
 есть.</p><nav class="pager" aria-label="Соседние страницы"><a href="admin-guide.html"><small>← Назад</small>Руководство администратора</a></nav></article></div>
-<footer>Собрано из Markdown 30.10.2026 08:33 · <code>make docs</code> · источник — <code>docs/*.md</code></footer></main>
+<footer>Собрано из Markdown 17.11.2026 08:04 · <code>make docs</code> · источник — <code>docs/*.md</code></footer></main>
 </div><button class="btn top" type="button" aria-label="Наверх">↑ Наверх</button>
 <script>
 (()=>{

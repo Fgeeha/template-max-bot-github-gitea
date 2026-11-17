@@ -18,7 +18,7 @@ BASE_IMAGE ?= harbor.volganet.ru/dockerhub-proxy/python:3.12-slim-bookworm
 UV_IMAGE ?= harbor.volganet.ru/github-proxy/astral-sh/uv:latest
 POSTGRES_IMAGE ?= harbor.volganet.ru/dockerhub-proxy/postgres:16-alpine
 USE_NEXUS_APT ?= 1
-# Дополнительные extras для сборки образа: "--extra db --extra metrics"
+# Дополнительные extras для сборки образа, напр. "--extra metrics"
 INSTALL_EXTRAS ?=
 export BASE_IMAGE UV_IMAGE POSTGRES_IMAGE USE_NEXUS_APT INSTALL_EXTRAS
 
@@ -27,7 +27,7 @@ DC_PROD  := $(COMPOSE) --env-file .env -f docker/docker-compose.prod.yml
 GITEA_URL := https://gitea.volganet.ru
 
 .PHONY: help init install install-all run lint format test check \
-        precommit up-local down-local restart-local logs \
+        precommit up-local up-local-db down-local restart-local logs \
         up-prod down-prod migrate migration dump restore docs clean
 
 help: ## Показать список целей
@@ -42,10 +42,11 @@ init: ## Создать новый проект из шаблона (интер�
 install: ## Установить базовые зависимости
 	uv sync
 
-install-all: ## Установить зависимости со всеми extras (db, metrics)
+install-all: ## Установить зависимости со всеми extras (metrics)
 	uv sync --all-extras
 
-run: ## Запустить бота локально
+run: ## Запустить бота локально (база — make up-local-db)
+	uv run alembic upgrade head
 	uv run python -m bot
 
 lint: ## Проверить код (ruff check)
@@ -78,14 +79,14 @@ precommit: ## Установить и прогнать pre-commit
 # берёт дефолт. env_file: внутри compose — другой механизм, он передаёт
 # переменные в контейнер и подстановку в YAML не заменяет.
 
-up-local: ## Поднять бота локально в Docker
+up-local: ## Поднять бота и Postgres локально в Docker
 	$(DC_LOCAL) up -d --build
 
-up-local-db: ## Поднять бота вместе с Postgres (профиль db)
-	$(DC_LOCAL) --profile db up -d --build
+up-local-db: ## Поднять только Postgres (для make run с хоста)
+	$(DC_LOCAL) up -d db
 
 down-local: ## Остановить локальный стек
-	$(DC_LOCAL) --profile db down
+	$(DC_LOCAL) down
 
 restart-local: ## Пересобрать и перезапустить локальный стек
 	$(DC_LOCAL) down
@@ -100,13 +101,13 @@ up-prod: ## Поднять прод-конфигурацию
 down-prod: ## Остановить прод-конфигурацию
 	$(DC_PROD) down
 
-# --- База данных (только при extra `db`) ------------------------------------
+# --- База данных -----------------------------------------------------------
 
-migrate: ## Применить миграции
+migrate: ## Применить миграции к DATABASE_URL из .env
 	uv run alembic upgrade head
 
 migration: ## Создать ревизию: make migration m="описание"
-	@test -n "$(m)" || { echo "Укажите описание: make migration m=\"добавил users\""; exit 1; }
+	@test -n "$(m)" || { echo "Укажите описание: make migration m=\"добавил таблицу\""; exit 1; }
 	uv run alembic revision --autogenerate -m "$(m)"
 
 dump: ## Дамп локальной БД: make dump [f=backup.dump]

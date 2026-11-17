@@ -39,4 +39,3 @@ def test_status_hides_secrets(env) -> None:
     text = build_status_text()
     assert "super-secret-token" not in text
     assert "secret-password" not in text
-    assert "подключена" in text

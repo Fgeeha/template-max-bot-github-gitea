@@ -1,5 +1,7 @@
 """Служебные команды для администраторов: /v, /status.
 
+Админка разделов — в bot.handlers.editor.
+
 Неадминам команды не отвечают вовсе — для стороннего пользователя их как бы
 не существует. Это осознанный выбор: сообщение «недостаточно прав» само по
 себе раскрывает наличие скрытой функциональности.
@@ -10,12 +12,15 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from functools import wraps
+from typing import Any
 
 from maxapi import Dispatcher
 from maxapi.filters.command import Command
 from maxapi.types.updates.message_created import MessageCreated
 
 from bot.config import get_settings
+from bot.db.repositories import StaffRepository
+from bot.db.session import session_scope
 
 logger = logging.getLogger(__name__)
 
@@ -23,18 +28,42 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE_LEN = 3800
 
 
+def user_id_of(event: Any) -> int | None:
+    """user_id автора события; None — у системных событий его нет."""
+    try:
+        _, user_id = event.get_ids()
+    except (NotImplementedError, AttributeError):
+        return None
+    return user_id
+
+
+def is_owner(user_id: int | None) -> bool:
+    """Владелец — user_id из ADMIN_IDS: всё, включая управление администраторами."""
+    return user_id is not None and user_id in get_settings().admin_ids_set
+
+
+async def is_admin(user_id: int | None) -> bool:
+    """Владелец или администратор, добавленный через админку (таблица staff).
+
+    Роль читается из БД на каждом событии: отозванный администратор теряет
+    доступ сразу, без перезапуска бота.
+    """
+    if user_id is None:
+        return False
+    if is_owner(user_id):
+        return True
+    async with session_scope() as session:
+        return await StaffRepository(session).exists(user_id)
+
+
 def admin_only(
     handler: Callable[[MessageCreated], Awaitable[None]],
 ) -> Callable[[MessageCreated], Awaitable[None]]:
-    """Пропускает к хендлеру только user_id из ADMIN_IDS."""
+    """Пропускает к хендлеру только владельцев и администраторов."""
 
     @wraps(handler)
     async def wrapper(event: MessageCreated) -> None:
-        try:
-            _, user_id = event.get_ids()
-        except (NotImplementedError, AttributeError):
-            return
-        if user_id not in get_settings().admin_ids_set:
+        if not await is_admin(user_id_of(event)):
             return
         await handler(event)
 
@@ -72,8 +101,8 @@ def build_status_text() -> str:
         "",
         f"Режим: {settings.bot_mode.value}",
         f"PROD: {settings.prod}",
-        f"Администраторов: {len(settings.admin_ids_set)}",
-        f"База данных: {'подключена' if settings.database_url else 'не используется'}",
+        f"Владельцев (ADMIN_IDS): {len(settings.admin_ids_set)}",
+        f"Статистика: {'включена' if settings.stats_enabled else 'выключена'}",
         f"Метрики: {'включены' if settings.metrics_enabled else 'выключены'}",
         f"Сборка: {settings.build_tag or '—'}",
     ]

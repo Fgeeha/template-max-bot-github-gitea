@@ -22,16 +22,12 @@ def get_engine() -> AsyncEngine:
     """Возвращает singleton движка.
 
     Движок создаётся лениво: до первого обращения к БД пул соединений не
-    поднимается, поэтому бот без БД ничего не платит за наличие этого модуля.
+    поднимается, а тесты могут подменить DATABASE_URL до первого вызова.
     """
     global _engine
     if _engine is None:
-        settings = get_settings()
-        if not settings.database_url:
-            msg = "DATABASE_URL не задан — слой БД недоступен"
-            raise RuntimeError(msg)
         _engine = create_async_engine(
-            settings.database_url,
+            get_settings().database_url,
             # pool_pre_ping отсекает соединения, разорванные файрволом или
             # рестартом Postgres, — без него первый запрос после простоя падает.
             pool_pre_ping=True,

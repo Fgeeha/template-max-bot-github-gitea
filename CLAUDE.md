@@ -36,8 +36,9 @@ GitHub Actions и Gitea Actions. Подробное описание архит�
 
 ```bash
 make install       # uv sync — базовые зависимости
-make install-all    # uv sync --all-extras — с БД и метриками
-make run            # запуск бота локально (polling)
+make install-all    # uv sync --all-extras — с метриками
+make up-local-db    # только Postgres в Docker (127.0.0.1:5433) — для make run
+make run            # alembic upgrade head + бот локально (polling)
 make lint           # ruff check src tests
 make format          # ruff check --fix + ruff format
 make test           # pytest (герметичные тесты, без сети и без .env)
@@ -63,17 +64,33 @@ graceful shutdown по SIGINT/SIGTERM.
 счётчика.
 
 Регистрация в `handlers/__init__.py:register_all` **порядок-зависима**:
-outer middleware (`maintenance` → `throttling`) → хендлеры команд/callback'ов
-(`admin` → `start` → `menu`) → catch-all свободного текста последним. Новый
-хендлер добавлять строго до `menu.register(dp)`.
+outer middleware (`maintenance` → `throttling`) → `admin` (/v, /status) →
+`editor` (админка: /admin, кнопки `a:…`, ожидаемый ввод) → `start` (/start,
+/id) → `menu` (кнопки `s:…` и catch-all текста) последним. Новый хендлер
+добавлять строго до `menu.register(dp)`.
 
-`keyboards/callbacks.py` — типизированные payload'ы кнопок (единственное
-место, где завязаны кнопка и её обработчик); `keyboards/menus.py` — разделы
-меню как данные (`SECTIONS`), не код.
+Контент — дерево `sections` в БД (обязательна), правится в админке MAX;
+демо-наполнение — `SEED` в начальной миграции. Роли: `admin.is_owner` —
+`ADMIN_IDS`, `admin.is_admin` — владелец или запись `staff` (async, читается
+из БД на каждом событии). `keyboards/callbacks.py` — payload'ы: `s:<id>` —
+раздел, `a:<действие>:<цель>` — админка (цель — id раздела или аргумент
+инструмента). Экран админки — `handlers/screens.py`; инструменты (админы,
+статистика `section_views`, JSON экспорт/импорт, журнал `audit_log`) —
+`handlers/tools.py`, ввод для них маршрутизирует `editor.on_admin_input` по
+`tools.INPUT_ACTIONS`. Ожидание ввода (`handlers/pending.waiting`) — в памяти
+процесса. Проверка ввода и файла импорта — `handlers/inputs.py`. Каждая правка
+пишет `AuditRepository.log` в той же транзакции. Правка сообщения на месте и
+fallback на новое — `menu.show_in_place`.
 
-`db/` (опционально, требует `DATABASE_URL` и `--extra db`) — SQLAlchemy async
-+ Alembic; весь SQL только в `db/repositories/`, хендлеры к сессии напрямую не
-обращаются. `alembic.ini` не содержит DSN — берётся из `config.py`.
+`db/` — SQLAlchemy async + Alembic; весь SQL только в `db/repositories/`,
+хендлеры к сессии напрямую не обращаются. `alembic.ini` не содержит DSN —
+берётся из `config.py`. Контейнер стартует с `alembic upgrade head`. После
+правки моделей — `make migration m="…"` и `uv run alembic check` против
+Postgres (тесты идут на SQLite и миграции не проверяют).
+
+**Тесты** не мокают maxapi-диспетчер: хендлеры вызываются напрямую с
+заглушками (`tests/fakes.py`: `FakeMessage`, `FakeCallback`, `press`, `send`), БД —
+SQLite в памяти; фикстура `db` подменяет `bot.db.session.get_sessionmaker`.
 
 `webhook.py` — маршрут отвечает MAX сразу, обработка апдейта уходит в фоновую
 задачу (`BackgroundDispatcher`), не удерживая HTTP-соединение; очередь
