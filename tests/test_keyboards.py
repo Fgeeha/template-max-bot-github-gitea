@@ -1,57 +1,64 @@
-"""Проверки payload'ов и сборки клавиатур."""
+"""Проверки payload'ов кнопок и сборки клавиатур."""
 
 from __future__ import annotations
 
 import pytest
 
-from bot.keyboards.callbacks import (
-    MAX_PAYLOAD_LEN,
-    BackPayload,
-    MenuPayload,
-    PayloadError,
-)
-from bot.keyboards.menus import SECTIONS, get_section, main_menu
+from bot.db.models import Section
+from bot.keyboards.callbacks import AdminAction, AdminPayload, PayloadError, SectionPayload
+from bot.keyboards.menus import admin_keyboard, section_keyboard
 
 
-def test_menu_payload_roundtrip() -> None:
-    packed = MenuPayload(section="about").pack()
-    assert MenuPayload.unpack(packed).section == "about"
+def test_section_payload_roundtrip() -> None:
+    assert SectionPayload.unpack(SectionPayload(section_id=42).pack()).section_id == 42
 
 
-def test_menu_payload_rejects_foreign_prefix() -> None:
+@pytest.mark.parametrize("raw", ["s:", "s:abc", "a:open:1", "menu:about"])
+def test_section_payload_rejects_garbage(raw: str) -> None:
     with pytest.raises(PayloadError):
-        MenuPayload.unpack("back")
+        SectionPayload.unpack(raw)
 
 
-def test_menu_payload_rejects_empty_section() -> None:
+@pytest.mark.parametrize("action", list(AdminAction))
+def test_admin_payload_roundtrip(action: AdminAction) -> None:
+    payload = AdminPayload(action=action, target=7)
+    assert AdminPayload.unpack(payload.pack()) == payload
+
+
+@pytest.mark.parametrize("raw", ["a:open", "a:hack:1", "a:open:x", "s:1"])
+def test_admin_payload_rejects_garbage(raw: str) -> None:
     with pytest.raises(PayloadError):
-        MenuPayload.unpack("menu:")
+        AdminPayload.unpack(raw)
 
 
-def test_long_payload_rejected() -> None:
-    """Платформа обрезает длинный payload молча — ловим это при сборке кнопки."""
-    with pytest.raises(PayloadError):
-        MenuPayload(section="x" * MAX_PAYLOAD_LEN).pack()
+def test_prefixes_do_not_overlap() -> None:
+    """Кнопка админки не должна уйти в пользовательскую навигацию и наоборот."""
+    admin = AdminPayload(action=AdminAction.OPEN, target=1).pack()
+    user = SectionPayload(section_id=1).pack()
+    assert AdminPayload.matches(admin) and not SectionPayload.matches(admin)
+    assert SectionPayload.matches(user) and not AdminPayload.matches(user)
 
 
-def test_back_payload_matches_itself() -> None:
-    assert BackPayload.matches(BackPayload().pack())
-    assert not MenuPayload.matches(BackPayload().pack())
+def test_leaf_has_no_keyboard() -> None:
+    root = Section(id=1, parent_id=None, title="Главное меню", text="")
+    assert section_keyboard(root, []) is None
 
 
-def test_all_sections_have_unique_ids() -> None:
-    ids = [section.id for section in SECTIONS]
-    assert len(ids) == len(set(ids))
+def test_admin_keyboard_root_has_no_delete() -> None:
+    root = Section(id=1, parent_id=None, title="Главное меню", text="")
+    payloads = [b.payload for row in admin_keyboard(root, []).payload for b in row]
+    assert AdminPayload(action=AdminAction.DELETE, target=1).pack() not in payloads
+    child = Section(id=2, parent_id=1, title="Раздел", text="")
+    payloads = [b.payload for row in admin_keyboard(child, []).payload for b in row]
+    assert AdminPayload(action=AdminAction.DELETE, target=2).pack() in payloads
 
 
-def test_every_section_payload_resolves() -> None:
-    """Каждая callback-кнопка меню должна вести в существующий раздел."""
-    for section in SECTIONS:
-        if section.url:
-            continue
-        packed = MenuPayload(section=section.id).pack()
-        assert get_section(MenuPayload.unpack(packed).section) is not None
+def test_admin_screen_fits_max_rows() -> None:
+    """При предельном числе подразделов экран админки влезает в 30 рядов MAX."""
+    from bot.keyboards.menus import MAX_CHILDREN
 
-
-def test_main_menu_builds() -> None:
-    assert main_menu().as_markup() is not None
+    section = Section(id=2, parent_id=1, title="Раздел", text="")
+    children = [
+        Section(id=10 + i, parent_id=2, title=f"П{i}", text="") for i in range(MAX_CHILDREN)
+    ]
+    assert len(admin_keyboard(section, children).payload) <= 30

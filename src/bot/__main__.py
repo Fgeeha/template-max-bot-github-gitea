@@ -16,6 +16,7 @@ from maxapi.enums.update import UpdateType
 from maxapi.exceptions.max import MaxApiError
 
 from bot.config import Settings, get_settings
+from bot.db.session import dispose_engine
 from bot.runtime import (
     build_connection_properties,
     build_ssl_context,
@@ -188,10 +189,9 @@ async def _run() -> None:
     setup_logging(settings.log_level)
 
     logger.info(
-        "Старт: BOT_MODE=%s PROD=%s DB=%s METRICS=%s BUILD_TAG=%s",
+        "Старт: BOT_MODE=%s PROD=%s METRICS=%s BUILD_TAG=%s",
         settings.bot_mode.value,
         settings.prod,
-        "on" if settings.database_url else "off",
         "on" if settings.metrics_enabled else "off",
         settings.build_tag or "-",
     )
@@ -247,10 +247,7 @@ async def _run() -> None:
         await background.drain(settings.webhook_drain_timeout)
 
     await bot.close_session()
-    if settings.database_url:
-        from bot.db.session import dispose_engine
-
-        await dispose_engine()
+    await dispose_engine()
     logger.info("Остановлено")
 
 

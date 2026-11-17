@@ -22,7 +22,7 @@ FROM ${BASE_IMAGE} AS base
 # INDEX_URL содержит пароль к Nexus — НИКОГДА не выводить его в echo и не
 # писать в ENV: значение осело бы в метаданных образа в открытом виде.
 ARG INDEX_URL=""
-# Дополнительные extras: "--extra db", "--extra metrics" или оба.
+# Дополнительные extras, напр. "--extra metrics". БД — в базовых зависимостях.
 ARG INSTALL_EXTRAS=""
 ARG NEXUS_URL="https://nexus.volganet.ru"
 # 1 — APT через Nexus Debian-proxy (закрытый контур); 0 — штатные репозитории.
@@ -121,4 +121,6 @@ USER appuser
 # Порт слушается только при BOT_MODE=webhook; в polling EXPOSE — просто
 # декларация для оркестратора.
 EXPOSE 8081
-CMD ["python", "-m", "bot"]
+# Миграции перед стартом: свежая БД получает схему и демо-разделы,
+# существующая — только новые ревизии. exec — чтобы SIGTERM дошёл до бота.
+CMD ["sh", "-c", "alembic upgrade head && exec python -m bot"]

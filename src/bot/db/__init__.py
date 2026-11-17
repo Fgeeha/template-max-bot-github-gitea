@@ -1,11 +1,7 @@
-"""Слой хранилища (опционально, extra `db`).
+"""Слой хранилища: SQLAlchemy async + Alembic.
 
-Подключается только когда задан DATABASE_URL. Если бот stateless — каталог
-можно удалить целиком вместе с `migrations/`, `alembic.ini` и extra `db`
-в pyproject.toml; остальной код на него не ссылается напрямую.
-
-Импорты внутри пакета намеренно ленивые (внутри функций `bot.__main__`),
-чтобы отсутствие sqlalchemy/asyncpg не ломало запуск бота без БД.
+Разделы меню и их тексты хранятся в Postgres и правятся через админку,
+поэтому БД обязательна. Весь SQL — в `bot.db.repositories`.
 """
 
 from bot.db.session import dispose_engine, get_session, session_scope

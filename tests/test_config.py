@@ -56,4 +56,4 @@ def test_sync_dsn_rejected(env) -> None:
 
 def test_async_dsn_accepted(env) -> None:
     settings = env(DATABASE_URL="postgresql+asyncpg://bot:bot@db:5432/bot")
-    assert settings.database_url is not None
+    assert settings.database_url.startswith("postgresql+asyncpg://")

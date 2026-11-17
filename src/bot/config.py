@@ -97,10 +97,23 @@ class Settings(BaseSettings):
     # Список user_id через запятую: "123, 456". Разбор — в admin_ids_set.
     admin_ids: str = ""
 
-    # ---- Хранилище (опционально, extra `db`) -------------------------------
-    # DSN вида postgresql+asyncpg://user:pass@host:5432/dbname.
-    # None — бот работает без БД (stateless), слой bot.db не инициализируется.
-    database_url: str | None = None
+    # ---- Хранилище ---------------------------------------------------------
+    # DSN вида postgresql+asyncpg://user:pass@host:5432/dbname. Обязателен:
+    # разделы меню и их тексты живут в БД.
+    database_url: str
+
+    # ---- Статистика --------------------------------------------------------
+    # Записывать открытия разделов (отчёт — «📊 Статистика» в /admin).
+    # Вместо user_id хранится HMAC-хеш: уникальных посчитать можно, узнать
+    # кто — нет. Нажатия администраторов не учитываются.
+    stats_enabled: bool = True
+    # Секрет хеша. Пусто — берётся MAX_BOT_TOKEN (после смены токена старые
+    # и новые посетители считаются разными людьми).
+    stats_salt: str = ""
+
+    # Смещение от UTC для времени в журнале и отчётах админки (часы).
+    # Фиксированное, без tzdata: в slim-образе её может не быть.
+    display_utc_offset: int = 3
 
     # ---- Метрики (опционально, extra `metrics`) ----------------------------
     # Включает HTTP-сервер Prometheus на METRICS_ADDR.
@@ -145,7 +158,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_database(self) -> Settings:
         """Проверяет, что DSN асинхронный — синхронный драйвер молча не заработает."""
-        if self.database_url and "+asyncpg" not in self.database_url:
+        if "+asyncpg" not in self.database_url:
             msg = (
                 "DATABASE_URL должен использовать async-драйвер: "
                 "postgresql+asyncpg://user:pass@host:5432/dbname"

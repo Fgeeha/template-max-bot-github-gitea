@@ -5,6 +5,9 @@
 ни протестировать отдельно.
 """
 
-from bot.db.repositories.users import UserRepository
+from bot.db.repositories.audit import AuditRepository
+from bot.db.repositories.sections import SectionRepository
+from bot.db.repositories.staff import StaffRepository
+from bot.db.repositories.stats import StatsRepository
 
-__all__ = ["UserRepository"]
+__all__ = ["AuditRepository", "SectionRepository", "StaffRepository", "StatsRepository"]
